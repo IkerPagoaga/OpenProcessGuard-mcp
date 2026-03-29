@@ -1,8 +1,12 @@
-package tools
+﻿package tools
 
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
+
+	"processguard-mcp/internal/audit"
 	"processguard-mcp/internal/config"
 	"processguard-mcp/internal/tools/handlers"
 )
@@ -15,10 +19,10 @@ type ToolDef struct {
 
 // Registry returns all tools Claude can call.
 // Tools are grouped by hunting stage. Optional tools (requiring external binaries)
-// are still registered — they return a clear error if the binary is not configured.
+// are still registered â€” they return a clear error if the binary is not configured.
 func Registry() []ToolDef {
 	return []ToolDef{
-		// ── Stage 0: Native process enumeration (always available) ────────
+		// â”€â”€ Stage 0: Native process enumeration (always available) â”€â”€â”€â”€â”€â”€â”€â”€
 		{
 			Name:        "list_processes",
 			Description: "List all running processes with PID, name, parent PID, CPU%, memory usage, executable path, and current user. Use this as the starting point for any security analysis.",
@@ -26,7 +30,7 @@ func Registry() []ToolDef {
 		},
 		{
 			Name:        "get_process_detail",
-			Description: "Get deep detail on a single process: full command line, working directory, environment variables (filtered — secrets redacted), open file handles count, and thread count.",
+			Description: "Get deep detail on a single process: full command line, working directory, environment variables (filtered â€” secrets redacted), open file handles count, and thread count.",
 			InputSchema: pidSchema(),
 		},
 		{
@@ -50,7 +54,7 @@ func Registry() []ToolDef {
 			InputSchema: emptySchema(),
 		},
 
-		// ── Stage 1: Process Explorer ─────────────────────────────────────
+		// â”€â”€ Stage 1: Process Explorer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 		{
 			Name:        "get_process_tree",
 			Description: "Return the full parent-child process tree with signing status and company info. Requires procexp_path in config.json. Falls back to PowerShell if Process Explorer is unavailable.",
@@ -62,7 +66,7 @@ func Registry() []ToolDef {
 			InputSchema: emptySchema(),
 		},
 
-		// ── Stage 2: Autoruns ─────────────────────────────────────────────
+		// â”€â”€ Stage 2: Autoruns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 		{
 			Name:        "get_autoruns_entries",
 			Description: "Run autorunsc.exe and return ALL persistence entry points: registry Run/RunOnce keys, Scheduled Tasks, Services, Drivers, Browser Helper Objects, Codecs, and more. Requires autoruns_path in config.json.",
@@ -74,7 +78,7 @@ func Registry() []ToolDef {
 			InputSchema: emptySchema(),
 		},
 
-		// ── Stage 3: Network ─────────────────────────────────────────────
+		// â”€â”€ Stage 3: Network â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 		{
 			Name:        "get_established_connections",
 			Description: "Return only ESTABLISHED TCP connections with process names and optional GeoIP context. Filters out LISTENING/TIME_WAIT noise. Critical for detecting active C2 channels.",
@@ -86,7 +90,7 @@ func Registry() []ToolDef {
 			InputSchema: emptySchema(),
 		},
 
-		// ── Stage 4: Sysmon ──────────────────────────────────────────────
+		// â”€â”€ Stage 4: Sysmon â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 		{
 			Name:        "query_sysmon_events",
 			Description: "Query the Sysmon Windows Event Log for a specific event ID within the last N minutes. Event IDs: 1=ProcessCreate, 3=NetworkConnect, 7=ImageLoaded, 11=FileCreate. Requires Sysmon service.",
@@ -113,11 +117,11 @@ func Registry() []ToolDef {
 		},
 		{
 			Name:        "get_network_events",
-			Description: "Return Sysmon Event ID 3 (NetworkConnect) records for the last N minutes. Captures outbound connections at the time they were made — invaluable for detecting C2 beacons.",
+			Description: "Return Sysmon Event ID 3 (NetworkConnect) records for the last N minutes. Captures outbound connections at the time they were made â€” invaluable for detecting C2 beacons.",
 			InputSchema: sinceSchema(),
 		},
 
-		// ── Stage 5: VirusTotal ──────────────────────────────────────────
+		// â”€â”€ Stage 5: VirusTotal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 		{
 			Name:        "lookup_hash",
 			Description: "Look up a SHA256 file hash on VirusTotal and return the detection score (e.g. '5/72'). Results are cached locally for 24 hours. Requires vt_api_key in config.json.",
@@ -133,19 +137,29 @@ func Registry() []ToolDef {
 			},
 		},
 
-		// ── Orchestration ─────────────────────────────────────────────────
+		// â”€â”€ Orchestration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 		{
 			Name:        "run_full_hunt",
-			Description: "Execute the complete 4-stage threat hunt (Process Integrity → Persistence → Network → Sysmon) and return a structured HuntReport with severity-ranked findings and recommended actions. This is the primary entry point for a full security audit.",
+			Description: "Execute the complete 4-stage threat hunt (Process Integrity â†’ Persistence â†’ Network â†’ Sysmon) and return a structured HuntReport with severity-ranked findings and recommended actions. This is the primary entry point for a full security audit.",
 			InputSchema: emptySchema(),
 		},
 	}
 }
 
-// Call dispatches a tool call by name.
+// Call dispatches a tool call by name and records an audit log entry.
 func Call(cfg *config.Config, name string, args json.RawMessage) (string, error) {
+	start := time.Now()
+	result, err := callInner(cfg, name, args)
+	// Audit every call regardless of success/failure.
+	// safeArgs strips any field that might contain a secret.
+	audit.Log(name, safeAuditArgs(name, args), time.Since(start), err)
+	return result, err
+}
+
+// callInner is the actual dispatch â€” no audit concern here.
+func callInner(cfg *config.Config, name string, args json.RawMessage) (string, error) {
 	switch name {
-	// Stage 0 — Native
+	// Stage 0 â€” Native
 	case "list_processes":
 		return handlers.ListProcesses()
 	case "get_process_detail":
@@ -159,25 +173,25 @@ func Call(cfg *config.Config, name string, args json.RawMessage) (string, error)
 	case "get_startup_entries":
 		return handlers.GetStartupEntries()
 
-	// Stage 1 — Process Explorer
+	// Stage 1 â€” Process Explorer
 	case "get_process_tree":
 		return handlers.GetProcessTree(cfg)
 	case "get_unsigned_processes":
 		return handlers.GetUnsignedProcesses(cfg)
 
-	// Stage 2 — Autoruns
+	// Stage 2 â€” Autoruns
 	case "get_autoruns_entries":
 		return handlers.GetAutorunsEntries(cfg)
 	case "flag_autoruns_anomalies":
 		return handlers.FlagAutorunsAnomalies(cfg)
 
-	// Stage 3 — Network
+	// Stage 3 â€” Network
 	case "get_established_connections":
 		return handlers.GetEstablishedConnections(cfg)
 	case "get_foreign_connections":
 		return handlers.GetForeignConnections(cfg)
 
-	// Stage 4 — Sysmon
+	// Stage 4 â€” Sysmon
 	case "query_sysmon_events":
 		var p struct {
 			EventID      int `json:"event_id"`
@@ -214,7 +228,40 @@ func Call(cfg *config.Config, name string, args json.RawMessage) (string, error)
 	}
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────
+// safeAuditArgs returns a sanitised map of args suitable for the audit log.
+// It never includes values that might be secrets (sha256 hashes are kept as
+// they're just identifiers, not credentials).
+func safeAuditArgs(toolName string, args json.RawMessage) map[string]any {
+	if len(args) == 0 || string(args) == "null" || string(args) == "{}" {
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(args, &raw); err != nil {
+		return nil
+	}
+	// No secrets expected in tool args â€” but redact anything named "key" or "token"
+	safe := make(map[string]any, len(raw))
+	for k, v := range raw {
+		if containsAnyKey(k, "key", "token", "secret", "password") {
+			safe[k] = "[REDACTED]"
+		} else {
+			safe[k] = v
+		}
+	}
+	return safe
+}
+
+func containsAnyKey(s string, subs ...string) bool {
+	sl := strings.ToLower(s)
+	for _, sub := range subs {
+		if strings.Contains(sl, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func dispatchPID(args json.RawMessage, fn func(int) (string, error)) (string, error) {
 	var p struct {
@@ -269,3 +316,4 @@ func sinceSchema() interface{} {
 		},
 	}
 }
+
