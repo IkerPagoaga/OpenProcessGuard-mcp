@@ -8,15 +8,15 @@ import (
 	"os"
 	"strings"
 
+	"processguard-mcp/internal/audit"
 	"processguard-mcp/internal/config"
 	"processguard-mcp/internal/procex"
 	"processguard-mcp/internal/tools"
 )
 
-// rawMessage lets us detect missing vs null fields
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"` // may be number, string, or absent (notification)
+	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
 }
@@ -42,10 +42,27 @@ func main() {
 	}
 
 	if err := procex.VerifyPath(cfg.ProcessExplorerPath); err != nil {
-		log.Fatalf("ProcessExplorer not found at %q: %v", cfg.ProcessExplorerPath, err)
+		log.Printf("⚠ ProcessExplorer not found at %q — Stage 1 tools will use fallback", cfg.ProcessExplorerPath)
 	}
 
-	log.Printf("ProcessGuard MCP ready | procexp: %s", cfg.ProcessExplorerPath)
+	// Initialise audit log if enabled
+	if cfg.AuditLog {
+		if err := audit.Init(); err != nil {
+			log.Printf("⚠ Audit log init failed: %v (continuing without audit)", err)
+		} else {
+			defer audit.Close()
+			log.Printf("Audit log active")
+		}
+	}
+
+	avail := cfg.Availability()
+	log.Printf("ProcessGuard MCP v2.0 ready")
+	log.Printf("  Stage 1 (Process Explorer): %v", avail.ProcessExplorer)
+	log.Printf("  Stage 2 (Autoruns):         %v", avail.Autoruns)
+	log.Printf("  Stage 3 (TCPView):          %v", avail.TCPView)
+	log.Printf("  Stage 4 (Sysmon):           %v", avail.Sysmon)
+	log.Printf("  VirusTotal:                 %v", avail.VirusTotal)
+	log.Printf("  GeoIP:                      %v", avail.GeoIP)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
@@ -64,13 +81,11 @@ func main() {
 			continue
 		}
 
-		// Notifications: method starts with "notifications/" — no response sent
 		if strings.HasPrefix(req.Method, "notifications/") {
-			log.Printf("notification received: %s (ignored)", req.Method)
+			log.Printf("notification: %s (ignored)", req.Method)
 			continue
 		}
 
-		// Requests with no id are also notifications — skip
 		if len(req.ID) == 0 || string(req.ID) == "null" {
 			if req.Method != "" {
 				log.Printf("null-id message: %s (ignored)", req.Method)
@@ -78,7 +93,6 @@ func main() {
 			continue
 		}
 
-		// Parse id as raw value (could be number or string)
 		var id interface{}
 		json.Unmarshal(req.ID, &id)
 
@@ -106,7 +120,7 @@ func dispatch(cfg *config.Config, req Request) (interface{}, *RPCError) {
 			},
 			"serverInfo": map[string]string{
 				"name":    "processguard-mcp",
-				"version": "1.0.0",
+				"version": "2.0.0",
 			},
 		}, nil
 
@@ -139,6 +153,8 @@ func dispatch(cfg *config.Config, req Request) (interface{}, *RPCError) {
 		return nil, &RPCError{Code: -32601, Message: "Method not found: " + req.Method}
 	}
 }
+
+// need encoder to work with JSONRPC 2.0
 
 func writeError(enc *json.Encoder, id interface{}, code int, msg string) {
 	enc.Encode(Response{
