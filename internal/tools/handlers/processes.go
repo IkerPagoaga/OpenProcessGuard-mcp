@@ -10,6 +10,25 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
+// secretPatterns are env var name substrings that indicate sensitive values.
+// Matched case-insensitively. Matching vars are replaced with "[REDACTED]".
+var secretPatterns = []string{
+	"token", "secret", "password", "passwd", "pwd",
+	"key", "apikey", "api_key", "credential", "auth",
+	"private", "cert", "jwt", "bearer",
+}
+
+// isSensitiveEnvVar returns true if the env var name looks like a secret.
+func isSensitiveEnvVar(name string) bool {
+	lower := strings.ToLower(name)
+	for _, pattern := range secretPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 type ProcessInfo struct {
 	PID        int32   `json:"pid"`
 	Name       string  `json:"name"`
@@ -63,16 +82,19 @@ func ListProcesses() (string, error) {
 	return string(out), nil
 }
 
+// ProcessDetail is the rich view of a single process returned by get_process_detail.
+// Environment variables are included but sensitive values are redacted.
 type ProcessDetail struct {
-	PID         int32    `json:"pid"`
-	Name        string   `json:"name"`
-	ExePath     string   `json:"exe_path"`
-	Cmdline     []string `json:"cmdline"`
-	Cwd         string   `json:"cwd"`
-	Username    string   `json:"username"`
-	ThreadCount int32    `json:"thread_count"`
-	NumFDs      int32    `json:"open_handles"`
-	CreateTime  int64    `json:"create_time_unix"`
+	PID         int32             `json:"pid"`
+	Name        string            `json:"name"`
+	ExePath     string            `json:"exe_path"`
+	Cmdline     []string          `json:"cmdline"`
+	Cwd         string            `json:"cwd"`
+	Username    string            `json:"username"`
+	ThreadCount int32             `json:"thread_count"`
+	NumFDs      int32             `json:"open_handles"`
+	CreateTime  int64             `json:"create_time_unix"`
+	Environ     map[string]string `json:"environ,omitempty"` // sensitive values replaced with [REDACTED]
 }
 
 func GetProcessDetail(pid int) (string, error) {
@@ -108,6 +130,23 @@ func GetProcessDetail(pid int) (string, error) {
 		detail.CreateTime = ct
 	}
 
+	// Collect env vars with sensitive values redacted
+	if envs, err := p.Environ(); err == nil && len(envs) > 0 {
+		detail.Environ = make(map[string]string, len(envs))
+		for _, kv := range envs {
+			idx := strings.IndexByte(kv, '=')
+			if idx < 0 {
+				continue
+			}
+			k, v := kv[:idx], kv[idx+1:]
+			if isSensitiveEnvVar(k) {
+				detail.Environ[k] = "[REDACTED]"
+			} else {
+				detail.Environ[k] = v
+			}
+		}
+	}
+
 	out, err := json.MarshalIndent(detail, "", "  ")
 	if err != nil {
 		return "", err
@@ -116,12 +155,12 @@ func GetProcessDetail(pid int) (string, error) {
 }
 
 type NetworkConn struct {
-	PID        int32  `json:"pid"`
+	PID         int32  `json:"pid"`
 	ProcessName string `json:"process_name"`
-	Protocol   string `json:"protocol"`
-	LocalAddr  string `json:"local_addr"`
-	RemoteAddr string `json:"remote_addr"`
-	Status     string `json:"status"`
+	Protocol    string `json:"protocol"`
+	LocalAddr   string `json:"local_addr"`
+	RemoteAddr  string `json:"remote_addr"`
+	Status      string `json:"status"`
 }
 
 func GetNetworkConnections() (string, error) {
@@ -156,8 +195,8 @@ func GetNetworkConnections() (string, error) {
 			continue
 		}
 		conn := NetworkConn{
-			Protocol:   proto,
-			LocalAddr:  fields[1],
+			Protocol:  proto,
+			LocalAddr: fields[1],
 		}
 		if proto == "TCP" && len(fields) >= 5 {
 			conn.RemoteAddr = fields[2]
