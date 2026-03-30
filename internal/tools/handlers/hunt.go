@@ -1,4 +1,4 @@
-package handlers
+﻿package handlers
 
 import (
 	"encoding/json"
@@ -221,7 +221,8 @@ func runStage3(cfg *config.Config) []Finding {
 	return findings
 }
 
-// runStage4 queries Sysmon for the last 60 minutes of process create events.
+// runStage4 queries Sysmon for the last 60 minutes of process creation and
+// network connection events, flagging suspicious spawns and beacon-like patterns.
 func runStage4(cfg *config.Config) []Finding {
 	var findings []Finding
 	if !cfg.Availability().Sysmon {
@@ -236,41 +237,88 @@ func runStage4(cfg *config.Config) []Finding {
 		return findings
 	}
 
-	raw, err := GetProcessCreateEvents(cfg, 60)
-	if err != nil {
-		// Sysmon installed but no events or access denied
-		return findings
-	}
-	var events []SysmonEvent
-	if err := json.Unmarshal([]byte(raw), &events); err != nil {
-		return findings
-	}
-
-	// Flag suspicious Sysmon events: processes spawned from Office/browser
-	for _, e := range events {
-		if isSuspiciousParentInSysmon(e.ParentImage, e.ProcessName) {
-			findings = append(findings, Finding{
-				Stage:       4,
-				Severity:    SeverityHigh,
-				Category:    "SUSPICIOUS_SPAWN",
-				Description: fmt.Sprintf("Sysmon: %q spawned by %q at %s", e.ProcessName, e.ParentImage, e.Timestamp),
-				Entity:      fmt.Sprintf("PID %d", e.ProcessID),
-				Flags:       []string{"SUSPICIOUS_PARENT", "SYSMON_EVIDENCE"},
-				Confidence:  "HIGH",
-			})
+	// ── ID 1: ProcessCreate — suspicious parent-child spawns ────────────
+	rawCreate, err := GetProcessCreateEvents(cfg, 60)
+	if err == nil {
+		var createEvents []SysmonEvent
+		if json.Unmarshal([]byte(rawCreate), &createEvents) == nil {
+			for _, e := range createEvents {
+				if isSuspiciousParentInSysmon(e.ParentImage, e.ProcessName) {
+					findings = append(findings, Finding{
+						Stage:       4,
+						Severity:    SeverityHigh,
+						Category:    "SUSPICIOUS_SPAWN",
+						Description: fmt.Sprintf("Sysmon: %q spawned by %q at %s", e.ProcessName, e.ParentImage, e.Timestamp),
+						Entity:      fmt.Sprintf("PID %d", e.ProcessID),
+						Flags:       []string{"SUSPICIOUS_PARENT", "SYSMON_EVIDENCE"},
+						Confidence:  "HIGH",
+					})
+				}
+			}
+			if len(createEvents) > 0 {
+				findings = append(findings, Finding{
+					Stage:       4,
+					Severity:    SeverityInfo,
+					Category:    "SYSMON_SUMMARY",
+					Description: fmt.Sprintf("Sysmon recorded %d process creation events in the last 60 minutes.", len(createEvents)),
+					Entity:      "sysmon",
+					Confidence:  "HIGH",
+				})
+			}
 		}
 	}
 
-	if len(events) > 0 {
-		findings = append(findings, Finding{
-			Stage:       4,
-			Severity:    SeverityInfo,
-			Category:    "SYSMON_SUMMARY",
-			Description: fmt.Sprintf("Sysmon recorded %d process creation events in the last 60 minutes.", len(events)),
-			Entity:      "sysmon",
-			Confidence:  "HIGH",
-		})
+	// ── ID 3: NetworkConnect — detect unusual outbound connections ───────
+	rawNet, err := GetNetworkEvents(cfg, 60)
+	if err == nil {
+		var netEvents []SysmonEvent
+		if json.Unmarshal([]byte(rawNet), &netEvents) == nil {
+			// Beacon indicator: scripting hosts / admin tools making outbound internet connections
+			beaconSources := []string{
+				"powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe",
+				"mshta.exe", "rundll32.exe", "regsvr32.exe", "certutil.exe",
+				"bitsadmin.exe", "msiexec.exe",
+			}
+			for _, e := range netEvents {
+				srcLower := lowerBase(e.ProcessName)
+				for _, b := range beaconSources {
+					if srcLower == b && e.DestIP != "" {
+						desc := fmt.Sprintf("Sysmon: %q made outbound connection to %s", e.ProcessName, e.DestIP)
+						if e.DestPort > 0 {
+							desc += fmt.Sprintf(":%d", e.DestPort)
+						}
+						if e.DestHostname != "" {
+							desc += fmt.Sprintf(" (%s)", e.DestHostname)
+						}
+						if e.Timestamp != "" {
+							desc += fmt.Sprintf(" at %s", e.Timestamp)
+						}
+						findings = append(findings, Finding{
+							Stage:       4,
+							Severity:    SeverityHigh,
+							Category:    "BEACON_CANDIDATE",
+							Description: desc,
+							Entity:      fmt.Sprintf("PID %d -> %s", e.ProcessID, e.DestIP),
+							Flags:       []string{"SCRIPTING_HOST_NETWORK", "SYSMON_EVIDENCE"},
+							Confidence:  "HIGH",
+						})
+						break
+					}
+				}
+			}
+			if len(netEvents) > 0 {
+				findings = append(findings, Finding{
+					Stage:       4,
+					Severity:    SeverityInfo,
+					Category:    "SYSMON_NETWORK_SUMMARY",
+					Description: fmt.Sprintf("Sysmon recorded %d network connection events in the last 60 minutes.", len(netEvents)),
+					Entity:      "sysmon",
+					Confidence:  "HIGH",
+				})
+			}
+		}
 	}
+
 	return findings
 }
 

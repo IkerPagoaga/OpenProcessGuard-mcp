@@ -3,6 +3,8 @@ package geoip
 import (
 	"fmt"
 	"net"
+
+	"github.com/oschwald/geoip2-golang"
 )
 
 // Location holds the resolved geographic context for an IP address.
@@ -17,27 +19,27 @@ type Location struct {
 }
 
 // DB wraps a MaxMind GeoLite2 database reader.
-// Using an interface here so we can swap in a stub when no .mmdb is present.
 type DB struct {
-	path   string
+	reader *geoip2.Reader
 	loaded bool
-	// reader will hold *geoip2.Reader once the MaxMind dependency is added.
-	// For now the field is unexported and the package compiles without it.
 }
 
 // Open loads a GeoLite2-City.mmdb from the given path.
-// Returns a no-op DB (IsPrivate detection only) if path is empty or file missing.
+// Returns a no-op DB (IsPrivate detection only) if path is empty.
+// Returns an error only if the path is non-empty but the file can't be opened.
 func Open(path string) (*DB, error) {
 	if path == "" {
 		return &DB{}, nil
 	}
-	// TODO(P3): import github.com/oschwald/geoip2-golang and open the .mmdb here.
-	// For now we return a DB that can at least classify private IP ranges.
-	return &DB{path: path, loaded: false}, nil
+	r, err := geoip2.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("geoip: failed to open %s: %w", path, err)
+	}
+	return &DB{reader: r, loaded: true}, nil
 }
 
 // Lookup resolves a raw IP string to a Location.
-// Falls back to private-range detection when the .mmdb is not loaded.
+// Falls back to private-range detection only when the .mmdb is not loaded.
 func (db *DB) Lookup(rawIP string) Location {
 	ip := net.ParseIP(rawIP)
 	loc := Location{IP: rawIP}
@@ -48,24 +50,33 @@ func (db *DB) Lookup(rawIP string) Location {
 
 	loc.IsPrivate = isPrivate(ip)
 
-	if !db.loaded {
-		// Without the mmdb, we can only report private/public.
+	if !db.loaded || db.reader == nil {
 		if loc.IsPrivate {
 			loc.CountryName = "Private Network"
 		}
 		return loc
 	}
 
-	// TODO(P3): call the geoip2 reader here and populate CountryCode, City, ASN.
+	// City record gives us country + city in one query.
+	record, err := db.reader.City(ip)
+	if err == nil {
+		loc.CountryCode = record.Country.IsoCode
+		if name, ok := record.Country.Names["en"]; ok {
+			loc.CountryName = name
+		}
+		if name, ok := record.City.Names["en"]; ok {
+			loc.City = name
+		}
+	}
+
 	return loc
 }
 
 // Close releases the underlying database reader.
 func (db *DB) Close() error {
-	if !db.loaded {
-		return nil
+	if db.reader != nil {
+		return db.reader.Close()
 	}
-	// TODO(P3): reader.Close()
 	return nil
 }
 

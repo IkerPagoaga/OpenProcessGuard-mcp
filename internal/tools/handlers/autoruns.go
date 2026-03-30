@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"time"
 
 	"processguard-mcp/internal/config"
 )
@@ -19,11 +18,11 @@ type AutorunEntry struct {
 	Publisher     string `json:"publisher"`
 
 	// Binary details
-	ImagePath   string `json:"image_path"`
-	LaunchStr   string `json:"launch_string"`
-	SHA256      string `json:"sha256,omitempty"`
-	IsVerified  bool   `json:"is_verified"`  // code-signed by a trusted publisher
-	IsMicrosoft bool   `json:"is_microsoft"` // published by Microsoft
+	ImagePath  string `json:"image_path"`
+	LaunchStr  string `json:"launch_string"`
+	SHA256     string `json:"sha256,omitempty"`
+	IsVerified bool   `json:"is_verified"`  // code-signed by a trusted publisher
+	IsMicrosoft bool  `json:"is_microsoft"` // published by Microsoft
 
 	// VirusTotal (populated by autorunsc -v when key is configured)
 	VTDetections int `json:"vt_detections,omitempty"` // positive engine count
@@ -34,21 +33,24 @@ type AutorunEntry struct {
 	Reason string   `json:"reason,omitempty"`
 }
 
-// autorunsc CSV column indices (output of: autorunsc.exe -a * -c -h -v -u)
-// Columns: Time,Entry Location,Entry,Enabled,Category,Profile,Description,
-//          Signer,Company,Image Path,Version,Launch String,VT detection,VT permalink
+// autorunsColNames lists the canonical column header substrings we look for,
+// matched case-insensitively against the first CSV row autorunsc prints.
+// autorunsc -c header (typical): Time,Entry Location,Entry,Enabled,Category,
+//   Profile,Description,Signer,Company,Image Path,Version,Launch String,
+//   VT detection,VT permalink
+//
+// We use Contains matching so minor wording differences across tool versions
+// don't break parsing (e.g. "Entry Location" vs "EntryLocation").
 const (
-	colTime          = 0
-	colEntryLocation = 1
-	colEntry         = 2
-	colEnabled       = 3
-	colCategory      = 4
-	colDescription   = 6
-	colSigner        = 7
-	colCompany       = 8
-	colImagePath     = 9
-	colLaunchString  = 11
-	colVTDetection   = 12
+	aColEntryLocation = "entry location"
+	aColEntry         = "entry"     // matched after "entry location" — order matters
+	aColDescription   = "description"
+	aColSigner        = "signer"
+	aColCompany       = "company"
+	aColImagePath     = "image path"
+	aColLaunchString  = "launch string"
+	aColVTDetection   = "vt detection"
+	aColSHA256        = "sha-256" // present in newer autorunsc versions
 )
 
 // suspiciousAutorunDirs mirrors the process heuristic — autoruns from these
@@ -69,7 +71,6 @@ func GetAutorunsEntries(cfg *config.Config) (string, error) {
 	// -c   : CSV output
 	// -h   : include hash (SHA256)
 	// -s   : verify digital signatures
-	// -u   : show only unsigned entries  (remove this flag to see all)
 	// -nobanner : suppress the Sysinternals banner
 	args := []string{"-a", "*", "-c", "-h", "-s", "-nobanner", "-accepteula"}
 	if cfg.VTAPIKey != "" {
@@ -125,48 +126,124 @@ func FlagAutorunsAnomalies(cfg *config.Config) (string, error) {
 	return string(result), nil
 }
 
+// autorunsColIdx holds resolved column indices derived from the header row.
+type autorunsColIdx struct {
+	entryLocation int
+	entry         int
+	description   int
+	signer        int
+	company       int
+	imagePath     int
+	launchString  int
+	vtDetection   int
+	sha256        int
+}
+
+const colNotFound = -1
+
+// buildColIdx reads the header row from autorunsc CSV output and builds an
+// index map using case-insensitive substring matching.  This is resilient to
+// column-order changes across autorunsc versions.
+func buildColIdx(header string) autorunsColIdx {
+	cols := splitCSVLine(header)
+	idx := autorunsColIdx{
+		entryLocation: colNotFound,
+		entry:         colNotFound,
+		description:   colNotFound,
+		signer:        colNotFound,
+		company:       colNotFound,
+		imagePath:     colNotFound,
+		launchString:  colNotFound,
+		vtDetection:   colNotFound,
+		sha256:        colNotFound,
+	}
+	for i, col := range cols {
+		lower := strings.ToLower(strings.TrimSpace(col))
+		switch {
+		case strings.Contains(lower, aColEntryLocation):
+			idx.entryLocation = i
+		case lower == aColEntry || strings.HasPrefix(lower, "entry"):
+			// "Entry" must be matched after "Entry Location" — set only if not yet set
+			// and the column doesn't also contain "location"
+			if idx.entry == colNotFound && !strings.Contains(lower, "location") {
+				idx.entry = i
+			}
+		case strings.Contains(lower, aColDescription):
+			idx.description = i
+		case strings.Contains(lower, aColSigner):
+			idx.signer = i
+		case strings.Contains(lower, aColCompany):
+			idx.company = i
+		case strings.Contains(lower, aColImagePath):
+			idx.imagePath = i
+		case strings.Contains(lower, aColLaunchString):
+			idx.launchString = i
+		case strings.Contains(lower, aColVTDetection):
+			idx.vtDetection = i
+		case strings.Contains(lower, aColSHA256) || lower == "sha256":
+			idx.sha256 = i
+		}
+	}
+	return idx
+}
+
+// safeCol returns cols[i] if i is valid and in-bounds; otherwise "".
+func safeCol(cols []string, i int) string {
+	if i == colNotFound || i >= len(cols) {
+		return ""
+	}
+	return cols[i]
+}
+
 // parseAutorunsCSV converts autorunsc CSV output into AutorunEntry structs.
+// The first non-empty line is treated as the header and used to resolve column
+// positions dynamically, so parsing is robust across autorunsc version changes.
 func parseAutorunsCSV(csv string) ([]AutorunEntry, error) {
 	var entries []AutorunEntry
 	lines := strings.Split(csv, "\n")
-	if len(lines) < 2 {
+
+	// Find the header line (first non-empty line)
+	headerLine := ""
+	dataStart := 0
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			headerLine = trimmed
+			dataStart = i + 1
+			break
+		}
+	}
+	if headerLine == "" {
 		return entries, nil
 	}
 
-	// Skip the header line
-	for _, line := range lines[1:] {
+	idx := buildColIdx(headerLine)
+
+	for _, line := range lines[dataStart:] {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		cols := splitCSVLine(line)
-		if len(cols) < colLaunchString+1 {
-			continue
-		}
 
+		signer := safeCol(cols, idx.signer)
 		e := AutorunEntry{
-			EntryLocation: cols[colEntryLocation],
-			EntryName:     cols[colEntry],
-			Description:   cols[colDescription],
-			Publisher:     cols[colCompany],
-			ImagePath:     cols[colImagePath],
-			LaunchStr:     cols[colLaunchString],
+			EntryLocation: safeCol(cols, idx.entryLocation),
+			EntryName:     safeCol(cols, idx.entry),
+			Description:   safeCol(cols, idx.description),
+			Publisher:     safeCol(cols, idx.company),
+			ImagePath:     safeCol(cols, idx.imagePath),
+			LaunchStr:     safeCol(cols, idx.launchString),
+			SHA256:        safeCol(cols, idx.sha256),
 		}
 
-		signer := cols[colSigner]
 		e.IsVerified = signer != "" && !strings.EqualFold(signer, "(Not verified)")
 		e.IsMicrosoft = strings.Contains(strings.ToLower(signer), "microsoft")
 
 		// VT detection column: "5/72" format
-		if len(cols) > colVTDetection {
-			vtStr := cols[colVTDetection]
+		vtStr := safeCol(cols, idx.vtDetection)
+		if vtStr != "" {
 			fmt.Sscanf(vtStr, "%d/%d", &e.VTDetections, &e.VTTotal)
-		}
-
-		// SHA256 is extracted from the image path column in newer autorunsc versions
-		// Format varies; we store it when present
-		if strings.HasPrefix(cols[colImagePath], "SHA") {
-			e.SHA256 = cols[colImagePath]
 		}
 
 		entries = append(entries, e)
@@ -229,6 +306,3 @@ func splitCSVLine(line string) []string {
 	fields = append(fields, current.String())
 	return fields
 }
-
-// sentinel to avoid unused import
-var _ = time.Now

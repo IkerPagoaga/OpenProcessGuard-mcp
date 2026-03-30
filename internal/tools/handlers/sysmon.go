@@ -24,8 +24,13 @@ type SysmonEvent struct {
 	Hashes      string `json:"hashes,omitempty"`
 	DestIP      string `json:"dest_ip,omitempty"`
 	DestPort    int    `json:"dest_port,omitempty"`
+	DestHostname string `json:"dest_hostname,omitempty"`
+	Protocol    string `json:"protocol,omitempty"`
 	ImageLoaded string `json:"image_loaded,omitempty"`
-	RawXML      string `json:"raw_xml,omitempty"`
+	Signed      string `json:"signed,omitempty"`
+	Signature   string `json:"signature,omitempty"`
+	// RawXML is only populated when structured field extraction fails entirely.
+	RawXML string `json:"raw_xml,omitempty"`
 }
 
 var sysmonEventNames = map[int]string{
@@ -60,18 +65,23 @@ func QuerySysmonEvents(cfg *config.Config, eventID, sinceMinutes int) (string, e
 	since := time.Now().UTC().Add(-time.Duration(sinceMinutes) * time.Minute)
 	sinceStr := since.Format("2006-01-02T15:04:05.000Z")
 
-	// PowerShell query using Get-WinEvent with an XPath filter.
-	// The XPath filter is the most reliable approach across all Windows versions.
+	// Retrieve events as XML strings via ToXml().
+	// We use -ErrorAction SilentlyContinue so the call returns [] instead of
+	// throwing when the log exists but has no matching events.
 	psCmd := fmt.Sprintf(`
 $filter = @{
     LogName   = '%s'
     Id        = %d
-    StartTime = [datetime]'%s'
+    StartTime = [datetime]::Parse('%s')
 }
-$events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
-if ($events) {
-    $events | ForEach-Object { $_.ToXml() } | ConvertTo-Json -Compress
-} else {
+try {
+    $events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
+    if ($null -eq $events) { '[]'; exit }
+    # Single event comes back as an object, not an array — wrap it
+    $arr = @($events)
+    $xmlArr = $arr | ForEach-Object { $_.ToXml() }
+    $xmlArr | ConvertTo-Json -Compress -Depth 1
+} catch {
     '[]'
 }`, cfg.SysmonLog, eventID, sinceStr)
 
@@ -83,21 +93,21 @@ if ($events) {
 	}
 
 	raw := strings.TrimSpace(string(out))
-	if raw == "[]" || raw == "" {
+	if raw == "[]" || raw == "" || raw == "null" {
 		result, _ := json.Marshal([]SysmonEvent{})
 		return string(result), nil
 	}
 
-	// PowerShell returns either a JSON array of strings or a single string.
-	// Each string is an XML event. Parse each one.
+	// PowerShell ConvertTo-Json returns either a JSON array of strings (multiple
+	// events) or a bare JSON string (single event). Normalise to []string.
 	var xmlStrings []string
 	if err := json.Unmarshal([]byte(raw), &xmlStrings); err != nil {
-		// Single event — wrap in array
+		// Single event returned as a bare JSON string
 		var single string
 		if err2 := json.Unmarshal([]byte(raw), &single); err2 == nil {
 			xmlStrings = []string{single}
 		} else {
-			return "", fmt.Errorf("unexpected output format: %w", err)
+			return "", fmt.Errorf("unexpected output format from Get-WinEvent: %w", err)
 		}
 	}
 
@@ -130,34 +140,46 @@ func GetNetworkEvents(cfg *config.Config, sinceMinutes int) (string, error) {
 }
 
 // parseSysmonXML extracts key fields from a Sysmon event XML string.
-// This is a lightweight field extractor — not a full XML parser — to avoid
-// an xml dependency. We look for known Sysmon data field patterns.
+// Sysmon event XML uses both single-quoted and double-quoted attribute values
+// depending on the version and context — we handle both.
+// RawXML is only kept when no structured fields could be extracted at all.
 func parseSysmonXML(xmlStr string, eventID int) SysmonEvent {
 	e := SysmonEvent{
 		EventID:   eventID,
 		EventName: sysmonEventNames[eventID],
-		RawXML:    xmlStr,
 	}
 
+	// extract pulls the value of a named <Data> element, handling both quote styles.
 	extract := func(name string) string {
-		needle := `<Data Name='` + name + `'>`
-		idx := strings.Index(xmlStr, needle)
-		if idx == -1 {
-			needle = `<Data Name="` + name + `">`
-			idx = strings.Index(xmlStr, needle)
+		for _, q := range []string{"'", `"`} {
+			needle := `<Data Name=` + q + name + q + `>`
+			idx := strings.Index(xmlStr, needle)
 			if idx == -1 {
-				return ""
+				continue
+			}
+			start := idx + len(needle)
+			end := strings.Index(xmlStr[start:], "</Data>")
+			if end == -1 {
+				continue
+			}
+			return strings.TrimSpace(xmlStr[start : start+end])
+		}
+		return ""
+	}
+
+	// Timestamp: attribute value may be single- or double-quoted.
+	for _, q := range []string{"'", `"`} {
+		needle := `SystemTime=` + q
+		if idx := strings.Index(xmlStr, needle); idx >= 0 {
+			start := idx + len(needle)
+			if end := strings.Index(xmlStr[start:], q); end >= 0 {
+				e.Timestamp = xmlStr[start : start+end]
+				break
 			}
 		}
-		start := idx + len(needle)
-		end := strings.Index(xmlStr[start:], "</Data>")
-		if end == -1 {
-			return ""
-		}
-		return strings.TrimSpace(xmlStr[start : start+end])
 	}
 
-	// Common to many event types
+	// Fields common to many event types
 	e.ProcessName = extract("Image")
 	e.ProcessID, _ = strconv.Atoi(extract("ProcessId"))
 	e.CommandLine = extract("CommandLine")
@@ -167,19 +189,19 @@ func parseSysmonXML(xmlStr string, eventID int) SysmonEvent {
 
 	// Network events (ID 3)
 	e.DestIP = extract("DestinationIp")
-	destPortStr := extract("DestinationPort")
-	e.DestPort, _ = strconv.Atoi(destPortStr)
+	e.DestHostname = extract("DestinationHostname")
+	e.Protocol = extract("Protocol")
+	e.DestPort, _ = strconv.Atoi(extract("DestinationPort"))
 
 	// Image load events (ID 7)
 	e.ImageLoaded = extract("ImageLoaded")
+	e.Signed = extract("Signed")
+	e.Signature = extract("Signature")
 
-	// Timestamp from SystemTime attribute
-	needle := `SystemTime='`
-	if idx := strings.Index(xmlStr, needle); idx >= 0 {
-		start := idx + len(needle)
-		if end := strings.Index(xmlStr[start:], "'"); end >= 0 {
-			e.Timestamp = xmlStr[start : start+end]
-		}
+	// Only attach raw XML when we couldn't extract any meaningful field.
+	// This avoids bloating every response with multi-KB XML strings.
+	if e.ProcessName == "" && e.DestIP == "" && e.ImageLoaded == "" && e.Timestamp == "" {
+		e.RawXML = xmlStr
 	}
 
 	return e
