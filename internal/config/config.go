@@ -6,85 +6,71 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
 const configFileName = "config.json"
 
+// sysmonLogRe whitelists valid Sysmon log channel names.
+// Allowed chars: alphanumeric, space, hyphen, slash, underscore, dot.
+// This prevents PowerShell injection via a crafted sysmon_log value.
+var sysmonLogRe = regexp.MustCompile(`^[A-Za-z0-9 \-/_\.]+$`)
+
 type Config struct {
-	// Stage 0 — existing
 	ProcessExplorerPath string `json:"procexp_path"`
-
-	// Stage 1 — Process Explorer headless CSV
-	// procexp64.exe /accepteula /t exports to CSV; path validated at startup.
-	// Leave empty to skip Process Explorer tools gracefully.
-
-	// Stage 2 — Autoruns
-	// autorunsc.exe -a * -c -h -v -u  (headless CSV with hashes + VirusTotal)
-	AutorunsPath string `json:"autoruns_path"`
-
-	// Stage 3 — TCPView / network enrichment
-	// tcpvcon.exe -c exports CSV; used for richer connection state + process correlation.
-	TCPViewPath string `json:"tcpview_path"`
-
-	// Stage 4 — Sysmon forensic layer
-	// Windows Event Log channel; default is the standard Sysmon channel.
-	SysmonLog string `json:"sysmon_log"`
-
-	// VirusTotal API key (free tier: 4 req/min, 500 req/day)
-	// Stored here, NEVER echoed in any tool response.
-	VTAPIKey string `json:"vt_api_key"`
-
-	// GeoIP database path — MaxMind GeoLite2-City.mmdb
-	GeoIPDB string `json:"geoip_db"`
-
-	// AuditLog enables JSONL audit logging to %APPDATA%\ProcessGuard\audit.log
-	AuditLog bool `json:"audit_log"`
+	AutorunsPath        string `json:"autoruns_path"`
+	TCPViewPath         string `json:"tcpview_path"`
+	SysmonLog           string `json:"sysmon_log"`
+	VTAPIKey            string `json:"vt_api_key"`
+	GeoIPDB             string `json:"geoip_db"`
+	AuditLog            bool   `json:"audit_log"`
 }
 
-// Defaults applied when fields are missing from config.json.
 var configDefaults = Config{
 	SysmonLog: "Microsoft-Windows-Sysmon/Operational",
 	AuditLog:  true,
 }
 
 // Load resolves config in priority order:
-//  1. PROCEXP_PATH env var (legacy compat — populates ProcessExplorerPath only)
+//  1. PROCEXP_PATH env var (legacy compat)
 //  2. config.json next to the binary
-//  3. Interactive prompt for ProcessExplorerPath on first run
+//  3. Interactive prompt on first run
 func Load() (*Config, error) {
-	cfg := configDefaults // copy defaults
+	cfg := configDefaults
 
-	// 1. Legacy env var
 	if v := os.Getenv("PROCEXP_PATH"); v != "" {
 		cfg.ProcessExplorerPath = v
+		applyDefaults(&cfg)
 		return &cfg, nil
 	}
 
-	// 2. config.json next to binary
 	exeDir, err := execDir()
 	if err == nil {
 		cfgPath := filepath.Join(exeDir, configFileName)
 		if data, err := os.ReadFile(cfgPath); err == nil {
-			if err := json.Unmarshal(data, &cfg); err == nil && cfg.ProcessExplorerPath != "" {
+			if err := json.Unmarshal(data, &cfg); err == nil {
 				applyDefaults(&cfg)
+				if err := cfg.validate(); err != nil {
+					return nil, fmt.Errorf("config validation failed: %w", err)
+				}
 				return &cfg, nil
 			}
 		}
 	}
 
-	// 3. Interactive first-run prompt
+	// Interactive first-run prompt
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "┌─────────────────────────────────────────────────────┐")
-	fmt.Fprintln(os.Stderr, "│  ProcessGuard MCP — First Run Setup                 │")
-	fmt.Fprintln(os.Stderr, "└─────────────────────────────────────────────────────┘")
+	fmt.Fprintln(os.Stderr, "┌──────────────────────────────────────────────────────┐")
+	fmt.Fprintln(os.Stderr, "│  ProcessGuard MCP — First Run Setup                  │")
+	fmt.Fprintln(os.Stderr, "└──────────────────────────────────────────────────────┘")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "ProcessExplorer (procexp64.exe) path not found.")
 	fmt.Fprintln(os.Stderr, "Common locations:")
 	fmt.Fprintln(os.Stderr, "  C:\\Users\\<you>\\Downloads\\ProcessExplorer\\procexp64.exe")
 	fmt.Fprintln(os.Stderr, "  C:\\Tools\\SysinternalsSuite\\procexp64.exe")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprint(os.Stderr, "Enter full path to procexp64.exe: ")
+	fmt.Fprint(os.Stderr, "Enter full path to procexp64.exe (or press Enter to skip): ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -92,10 +78,6 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to read path: %w", err)
 	}
 	input = strings.TrimSpace(input)
-	if input == "" {
-		return nil, fmt.Errorf("no path provided")
-	}
-
 	cfg.ProcessExplorerPath = input
 	applyDefaults(&cfg)
 
@@ -104,6 +86,15 @@ func Load() (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// validate checks that config values are within expected safe bounds.
+// This prevents injection attacks via crafted config values.
+func (c *Config) validate() error {
+	if c.SysmonLog != "" && !sysmonLogRe.MatchString(c.SysmonLog) {
+		return fmt.Errorf("sysmon_log contains invalid characters — only alphanumeric, space, hyphen, slash, underscore, and dot are allowed")
+	}
+	return nil
 }
 
 func applyDefaults(cfg *Config) {
@@ -117,7 +108,7 @@ func save(path string, cfg *Config) {
 	if err != nil {
 		return
 	}
-	os.WriteFile(path, data, 0644)
+	os.WriteFile(path, data, 0600)
 }
 
 func execDir() (string, error) {
@@ -128,7 +119,7 @@ func execDir() (string, error) {
 	return filepath.Dir(exe), nil
 }
 
-// ToolAvailability reports which hunting stages are available given current config.
+// ToolAvailability reports which hunting stages are available.
 type ToolAvailability struct {
 	ProcessExplorer bool
 	Autoruns        bool
