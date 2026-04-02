@@ -1,6 +1,24 @@
-# ProcessGuard MCP v2.0
+# ProcessGuard MCP
 
-A Windows security monitoring MCP server for Claude Desktop. Exposes live process telemetry, persistence checks, network analysis, and Sysmon forensics through 21 tools organised across 5 hunting stages.
+> A free, open-source Windows security monitoring server for Claude Desktop.
+
+ProcessGuard exposes live process telemetry, persistence checks, network analysis, and Sysmon forensics through 21 tools organised across 5 hunting stages — all callable by Claude in plain language.
+
+**Built on the belief that security tooling should be open, auditable, and free.**
+
+---
+
+## Principles
+
+**Open source, fully auditable.** Every line of code is public. No telemetry, no phone-home, no hidden behaviour. If you don't trust it, read it.
+
+**Security by design.** ProcessGuard opens no listening ports. It communicates exclusively over `stdin`/`stdout` with Claude Desktop. All OS-sourced strings are sanitised before reaching Claude's context window to mitigate prompt injection. Environment variable secrets are redacted. The VirusTotal API key never appears in tool output or logs.
+
+**Read-only.** ProcessGuard observes — it does not modify files, registry keys, network settings, or any system state.
+
+**Free as in freedom.** MIT licensed. Fork it, extend it, contribute back.
+
+**Microsoft Sysinternals notice.** The optional Stages 1 and 2 integrate with Sysinternals tools (Process Explorer, Autoruns) published by Microsoft under a [separate licence](https://learn.microsoft.com/en-us/sysinternals/license-terms). Those tools are not bundled — you download them directly from Microsoft. Because of that licence, **ProcessGuard cannot be used as part of a commercial or monetised product when Sysinternals integration is enabled.** Stages 0, 3, 4, and 5 (native process enumeration, network analysis, Sysmon, and VirusTotal) are unrestricted.
 
 ---
 
@@ -17,8 +35,10 @@ A Windows security monitoring MCP server for Claude Desktop. Exposes live proces
 9. [Troubleshooting](#9-troubleshooting)
 10. [Tools Reference](#10-tools-reference)
 11. [Recommended Prompts](#11-recommended-prompts)
-12. [Security Notes](#12-security-notes)
+12. [Security](#12-security)
 13. [Architecture](#13-architecture)
+14. [Contributing](#14-contributing)
+15. [Licence](#15-licence)
 
 ---
 
@@ -41,34 +61,28 @@ Before you start, make sure the following are installed on your Windows machine.
 go version
 ```
 
-You should see something like `go version go1.22.0 windows/amd64`. If you get "command not found", Go is not in your PATH — reinstall it and make sure you check "Add to PATH" during setup.
+You should see something like `go version go1.22.0 windows/amd64`. If not, reinstall Go and check "Add to PATH" during setup.
 
 ---
 
 ## 2. Clone the Repository
 
-You need to be added as a collaborator by the repo owner before you can clone.
-
-Open a terminal and run:
-
 ```
-git clone https://github.com/IkerPagoaga/processGuard-mcp.git
-cd processGuard-mcp
+git clone https://github.com/IkerPagoaga/OpenProcessGuard-mcp.git
+cd OpenProcessGuard-mcp
 ```
-
-> If git asks for credentials, use your GitHub username and a [Personal Access Token](https://github.com/settings/tokens) (not your password).
 
 ---
 
 ## 3. Build the Binary
 
-From inside the `processGuard-mcp` folder, run:
+From inside the `OpenProcessGuard-mcp` folder, run:
 
 ```
 go build -o processguard-mcp.exe .
 ```
 
-Go will automatically download all dependencies and compile the binary. This takes about 30 seconds on first run.
+Go downloads all dependencies automatically. This takes about 30 seconds on first run.
 
 **Verify it worked:**
 
@@ -76,9 +90,9 @@ Go will automatically download all dependencies and compile the binary. This tak
 dir processguard-mcp.exe
 ```
 
-You should see the file listed at around 8 MB. If the build fails, make sure your Go version is 1.22 or newer (`go version`).
+You should see a file around 8 MB. If the build fails, confirm Go 1.22 or newer is installed (`go version`).
 
-> **Note:** You do not need to install any extra Go packages manually. `go build` handles everything via `go.mod`.
+> You do not need to install any packages manually — `go build` handles everything via `go.mod`.
 
 ---
 
@@ -86,9 +100,15 @@ You should see the file listed at around 8 MB. If the build fails, make sure you
 
 Create a file named exactly `config.json` in the **same folder as `processguard-mcp.exe`**.
 
+You can copy the template:
+
+```
+copy config.example.json config.json
+```
+
 ### Minimum config (no optional tools)
 
-This is enough to get started. All 6 Stage 0 tools will work immediately with no additional software.
+This gets all 6 Stage 0 tools working immediately — no additional software needed.
 
 ```json
 {
@@ -101,8 +121,6 @@ This is enough to get started. All 6 Stage 0 tools will work immediately with no
   "audit_log":     true
 }
 ```
-
-Copy this exactly, save the file as `config.json`, and move on. You can fill in the optional fields later (see [Step 8](#8-optional-tools)).
 
 ### Full config (all optional tools configured)
 
@@ -125,20 +143,18 @@ Copy this exactly, save the file as `config.json`, and move on. You can fill in 
 | `procexp_path` | No | `""` | Full path to `procexp64.exe`. Enables Stage 1 tools. Falls back to PowerShell if empty. |
 | `autoruns_path` | No | `""` | Full path to `autorunsc.exe`. Enables Stage 2 persistence scanning. |
 | `tcpview_path` | No | `""` | Reserved — not yet active. |
-| `sysmon_log` | No | `"Microsoft-Windows-Sysmon/Operational"` | Windows Event Log channel for Sysmon. Leave as default unless you have a custom Sysmon config. |
-| `vt_api_key` | No | `""` | Free VirusTotal API key. Enables `lookup_hash` and Stage 5 hash escalation. |
+| `sysmon_log` | No | `"Microsoft-Windows-Sysmon/Operational"` | Windows Event Log channel for Sysmon. Only alphanumeric characters, spaces, hyphens, slashes, underscores, and dots are allowed. |
+| `vt_api_key` | No | `""` | Free VirusTotal API key. Enables `lookup_hash` and Stage 5 hash escalation. Never echoed in output or logs. |
 | `geoip_db` | No | `""` | Path to MaxMind `GeoLite2-City.mmdb`. Enables country/city data on foreign connections. |
 | `audit_log` | No | `true` | Writes a JSONL audit log to `%APPDATA%\ProcessGuard\audit.log`. |
 
-> **Important:** All paths in `config.json` must use **double backslashes** (`\\`), not single backslashes. For example: `C:\\Tools\\procexp64.exe`.
+> **Important:** All paths in `config.json` must use **double backslashes** (`\\`). For example: `C:\\Tools\\procexp64.exe`.
+
+> **Security:** `config.json` is listed in `.gitignore` and must never be committed to version control — it may contain your VirusTotal API key and local paths.
 
 ---
 
 ## 5. Register with Claude Desktop
-
-This tells Claude Desktop where to find the ProcessGuard server.
-
-### Find the config file
 
 Open File Explorer and navigate to:
 
@@ -146,45 +162,21 @@ Open File Explorer and navigate to:
 %APPDATA%\Claude\
 ```
 
-You can paste that path directly into the File Explorer address bar and press Enter.
-
-Look for a file named `claude_desktop_config.json`.
-
-- **If the file exists:** open it in Notepad or any text editor.
-- **If the file does not exist:** create a new file in that folder named `claude_desktop_config.json`.
-
-### Add the ProcessGuard entry
-
-If the file is **empty or new**, paste this entire content:
+Open (or create) `claude_desktop_config.json` and add the ProcessGuard entry:
 
 ```json
 {
   "mcpServers": {
     "processguard": {
-      "command": "C:\\path\\to\\processGuard-mcp\\processguard-mcp.exe"
+      "command": "C:\\path\\to\\OpenProcessGuard-mcp\\processguard-mcp.exe"
     }
   }
 }
 ```
 
-If the file **already has other MCP servers**, add only the `processguard` block inside the existing `mcpServers` object:
+If the file already has other MCP servers, add the `processguard` block inside the existing `mcpServers` object.
 
-```json
-{
-  "mcpServers": {
-    "some-other-server": {
-      "command": "..."
-    },
-    "processguard": {
-      "command": "C:\\path\\to\\processGuard-mcp\\processguard-mcp.exe"
-    }
-  }
-}
-```
-
-> **Replace** `C:\\path\\to\\processGuard-mcp\\` with the actual folder where you cloned the repo. Use double backslashes. Example: `C:\\Users\\YourName\\Documents\\processGuard-mcp\\processguard-mcp.exe`
-
-### Save and close the file.
+> Replace `C:\\path\\to\\OpenProcessGuard-mcp\\` with the actual folder where you cloned the repo. Use double backslashes.
 
 ---
 
@@ -192,33 +184,30 @@ If the file **already has other MCP servers**, add only the `processguard` block
 
 ProcessGuard needs Administrator rights to enumerate all running processes and read the Sysmon Event Log.
 
-**How to run Claude Desktop as Administrator:**
-
 1. Find the Claude Desktop shortcut on your Desktop or Start Menu.
-2. Right-click it.
-3. Select **"Run as administrator"**.
-4. Click Yes on the UAC prompt.
+2. Right-click it → **"Run as administrator"**.
+3. Click Yes on the UAC prompt.
 
-> If you skip this step, Stage 0 tools will still work but some processes will be hidden, and Sysmon tools will return empty results.
+To make this permanent:
 
-To make this permanent so you don't have to remember every time:
-
-1. Right-click the Claude Desktop shortcut → **Properties**.
+1. Right-click the shortcut → **Properties**.
 2. Click **Advanced**.
 3. Check **"Run as administrator"**.
 4. Click OK → Apply.
+
+> If you skip this step, Stage 0 tools still work but some processes will be hidden and Sysmon tools will return empty results.
 
 ---
 
 ## 7. Verify the Installation
 
-Once Claude Desktop is open (as Administrator), type the following into the chat:
+Once Claude Desktop is open (as Administrator), type:
 
 ```
 Run list_processes and show me the top 5 by memory usage.
 ```
 
-If you see a table or list of running processes with PIDs and memory figures, **the installation is working correctly**.
+If you see a list of running processes with PIDs and memory figures, the installation is working.
 
 Then run the full baseline scan:
 
@@ -226,7 +215,7 @@ Then run the full baseline scan:
 Run run_full_hunt and summarise all findings by severity.
 ```
 
-This will run all available stages and return a structured report. Stages with unconfigured tools (Autoruns, Sysmon, VirusTotal) will appear as `INFO / TOOL_UNAVAILABLE` findings with instructions on how to enable them.
+Stages with unconfigured tools (Autoruns, Sysmon, VirusTotal) will appear as `INFO / TOOL_UNAVAILABLE` findings with instructions on how to enable them.
 
 ---
 
@@ -240,11 +229,9 @@ Each optional tool unlocks additional hunting stages. Install them in any order.
 
 Enables: `get_process_tree`, `get_unsigned_processes`
 
-**Install:**
-
 1. Download from: https://learn.microsoft.com/en-us/sysinternals/downloads/process-explorer
-2. Extract the zip to a permanent folder (e.g. `C:\Tools\SysinternalsSuite\`).
-3. Open `config.json` and set:
+2. Extract to a permanent folder (e.g. `C:\Tools\SysinternalsSuite\`).
+3. Set in `config.json`:
 
 ```json
 "procexp_path": "C:\\Tools\\SysinternalsSuite\\procexp64.exe"
@@ -258,29 +245,25 @@ Enables: `get_process_tree`, `get_unsigned_processes`
 
 Enables: `get_autoruns_entries`, `flag_autoruns_anomalies`, Stage 2 in `run_full_hunt`
 
-**Install:**
-
 1. Download from: https://learn.microsoft.com/en-us/sysinternals/downloads/autoruns
-2. Extract the zip to a permanent folder (e.g. `C:\Tools\SysinternalsSuite\`).
-3. Open `config.json` and set:
+2. Extract to a permanent folder (e.g. `C:\Tools\SysinternalsSuite\`).
+3. Set in `config.json`:
 
 ```json
 "autoruns_path": "C:\\Tools\\SysinternalsSuite\\autorunsc.exe"
 ```
 
-> Use `autorunsc.exe` (the command-line version), not `autoruns.exe` (the GUI version).
+> Use `autorunsc.exe` (command-line version), not `autoruns.exe` (GUI version).
 
 4. Restart Claude Desktop.
 
-**Verify it works:**
-
-Open a terminal as Administrator and run:
+**Verify it works:** Open a terminal as Administrator and run:
 
 ```
 C:\Tools\SysinternalsSuite\autorunsc.exe -a * -c -nobanner -accepteula
 ```
 
-You should see CSV output with a header row. This confirms ProcessGuard can call it correctly.
+You should see CSV output with a header row.
 
 ---
 
@@ -288,42 +271,36 @@ You should see CSV output with a header row. This confirms ProcessGuard can call
 
 Enables: `lookup_hash`, VT hash escalation in `run_full_hunt`
 
-**Get a free API key:**
-
-1. Go to https://www.virustotal.com and create a free account.
-2. After logging in, click your profile icon (top right) → **API key**.
-3. Copy the key.
-4. Open `config.json` and set:
+1. Create a free account at https://www.virustotal.com.
+2. Click your profile icon → **API key**.
+3. Copy the key and set in `config.json`:
 
 ```json
 "vt_api_key": "paste_your_key_here"
 ```
 
-5. Restart Claude Desktop.
+4. Restart Claude Desktop.
 
-> The free tier allows 4 requests per minute and 500 per day. ProcessGuard's `run_full_hunt` caps VT calls at 10 per hunt to stay within these limits.
+> Free tier: 4 requests/minute, 500/day. ProcessGuard caps VT calls at 10 per full hunt automatically.
 
 ---
 
 ### MaxMind GeoIP Database (Stage 3 enrichment)
 
-Enables: country and city data on `get_foreign_connections`
+Enables country and city data on `get_foreign_connections`.
 
-> Without this, `get_foreign_connections` still works and correctly filters out private IPs — you just won't see country names.
-
-**Get the free database:**
+> Without this, `get_foreign_connections` still works — you just won't see country names.
 
 1. Create a free MaxMind account at: https://www.maxmind.com/en/geolite2/signup
-2. After signing in, go to **Download Databases**.
-3. Download **GeoLite2-City** in `.mmdb` format.
-4. Extract and place the `.mmdb` file somewhere permanent (e.g. `C:\Tools\GeoIP\GeoLite2-City.mmdb`).
-5. Open `config.json` and set:
+2. Download **GeoLite2-City** in `.mmdb` format.
+3. Extract and place the `.mmdb` file somewhere permanent (e.g. `C:\Tools\GeoIP\GeoLite2-City.mmdb`).
+4. Set in `config.json`:
 
 ```json
 "geoip_db": "C:\\Tools\\GeoIP\\GeoLite2-City.mmdb"
 ```
 
-6. Restart Claude Desktop.
+5. Restart Claude Desktop.
 
 ---
 
@@ -331,11 +308,8 @@ Enables: country and city data on `get_foreign_connections`
 
 Enables: `query_sysmon_events`, `get_process_create_events`, `get_network_events`, Stage 4 in `run_full_hunt`
 
-**Install:**
-
 1. Download Sysmon from: https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon
-2. Download a recommended config file (SwiftOnSecurity's is a solid starting point):
-   https://github.com/SwiftOnSecurity/sysmon-config — download `sysmonconfig-export.xml`
+2. Download a recommended config (SwiftOnSecurity's is a solid starting point): https://github.com/SwiftOnSecurity/sysmon-config — download `sysmonconfig-export.xml`
 3. Open a terminal **as Administrator** and run:
 
 ```
@@ -350,67 +324,45 @@ Get-Service Sysmon64
 
 You should see `Status: Running`.
 
-> No `config.json` change is needed. The `sysmon_log` field already defaults to the correct Windows Event Log channel (`Microsoft-Windows-Sysmon/Operational`).
+> No `config.json` change needed — `sysmon_log` defaults to the correct Windows Event Log channel.
 
 5. Restart Claude Desktop.
-
-**Verify it works in Claude:**
-
-```
-Run query_sysmon_events with event_id=1 and since_minutes=10
-```
-
-You should see a list of process creation events from the last 10 minutes.
 
 ---
 
 ## 9. Troubleshooting
 
-### Tools don't appear in Claude Desktop
+**Tools don't appear in Claude Desktop**
+- Confirm `claude_desktop_config.json` is valid JSON (no trailing commas, double backslashes).
+- Confirm the path points to `processguard-mcp.exe` and the file exists.
+- Restart Claude Desktop as Administrator after every config change.
 
-- Make sure `claude_desktop_config.json` is valid JSON (no trailing commas, all paths use `\\`).
-- Confirm the path in the config points to `processguard-mcp.exe` and the file exists.
-- Restart Claude Desktop **as Administrator** after every config change.
+**`go build` fails**
+- Confirm Go 1.22 or newer is installed (`go version`).
+- Confirm you are inside the `OpenProcessGuard-mcp` folder when you run `go build`.
 
-### `go build` fails
-
-- Run `go version` — must be 1.22 or newer.
-- Make sure you are inside the `processGuard-mcp` folder when you run `go build`.
-- If you see network errors downloading dependencies, check your internet connection or corporate proxy settings.
-
-### `list_processes` returns empty or fewer processes than expected
-
+**`list_processes` returns fewer processes than expected**
 - Claude Desktop is not running as Administrator. See [Step 6](#6-run-claude-desktop-as-administrator).
 
-### `get_foreign_connections` returns local IPs (192.168.x.x etc.)
+**Sysmon tools return empty arrays**
+- Confirm Sysmon is running: `Get-Service Sysmon64`.
+- If stopped: `Start-Service Sysmon64`.
 
-- This is fixed in v2.0. Make sure you built the binary after cloning — don't use an old `.exe`.
+**Autoruns returns an error**
+- Confirm `autoruns_path` points to `autorunsc.exe`, not `autoruns.exe`.
+- Test it manually: run `autorunsc.exe -a * -c -nobanner -accepteula` in an admin terminal.
 
-### Sysmon tools return empty arrays
+**VirusTotal returns "rate limit reached"**
+- Free tier is 4 requests/minute. Wait 60 seconds and retry.
 
-- Confirm Sysmon is running: open PowerShell as Administrator and run `Get-Service Sysmon64`.
-- If the service is stopped, start it: `Start-Service Sysmon64`.
-- If Sysmon is not installed, follow the [Sysmon install steps](#sysmon-stage-4) above.
-
-### Autoruns returns an error
-
-- Confirm `autoruns_path` in `config.json` points to `autorunsc.exe` (not `autoruns.exe`).
-- Run `autorunsc.exe -a * -c -nobanner -accepteula` manually in an admin terminal to confirm it works.
-
-### VirusTotal returns "rate limit reached"
-
-- The free tier allows 4 requests per minute. Wait 60 seconds and try again.
-- `run_full_hunt` caps VT calls at 10 per run automatically.
-
-### config.json changes aren't taking effect
-
-- You must **restart Claude Desktop** after every change to `config.json`. The server reads it once at startup.
+**config.json changes not taking effect**
+- Restart Claude Desktop after every `config.json` change — the server reads it once at startup.
 
 ---
 
 ## 10. Tools Reference
 
-### Stage 0 — Native (always available, no config needed)
+### Stage 0 — Native (always available)
 
 | Tool | Description |
 |---|---|
@@ -418,14 +370,14 @@ You should see a list of process creation events from the last 10 minutes.
 | `get_process_detail` | Deep single-process view: cmdline, CWD, env vars (secrets redacted), thread count, handle count. |
 | `get_network_connections` | All TCP/UDP connections via `netstat -ano`, correlated with process names. |
 | `get_loaded_modules` | DLLs/modules loaded by a specific PID. Detects injection and sideloading. |
-| `get_suspicious_processes` | Heuristic scan: name spoofing (`svch0st`), wrong-path system processes, hollow process patterns, unsigned binaries in temp dirs, unusual parent-child chains. |
+| `get_suspicious_processes` | Heuristic scan: name spoofing, wrong-path system processes, hollow process patterns, unsigned binaries in temp dirs, unusual parent-child chains. |
 | `get_startup_entries` | Registry Run keys and startup folder entries (lightweight). |
 
 ### Stage 1 — Process Explorer (`procexp_path` required)
 
 | Tool | Description |
 |---|---|
-| `get_process_tree` | Full parent-child tree with signing status and company info. Falls back to PowerShell if procexp unavailable. |
+| `get_process_tree` | Full parent-child tree with signing status and company info. |
 | `get_unsigned_processes` | All running processes without a trusted digital signature. |
 
 ### Stage 2 — Autoruns (`autoruns_path` required)
@@ -440,27 +392,27 @@ You should see a list of process creation events from the last 10 minutes.
 | Tool | Description |
 |---|---|
 | `get_established_connections` | ESTABLISHED TCP connections only (filters LISTENING/TIME_WAIT noise). |
-| `get_foreign_connections` | Connections to non-private internet IPs, with optional GeoIP country data. Primary C2 and data-exfil candidates. |
+| `get_foreign_connections` | Connections to non-private internet IPs, with optional GeoIP country data. |
 
 ### Stage 4 — Sysmon (Sysmon service required)
 
 | Tool | Description |
 |---|---|
-| `query_sysmon_events` | Query any Sysmon Event ID within the last N minutes. IDs: 1=ProcessCreate, 3=NetworkConnect, 7=ImageLoaded, 11=FileCreate. |
-| `get_process_create_events` | Sysmon Event 1 records: cmdline, parent image, user, hashes. Forensic timeline. |
-| `get_network_events` | Sysmon Event 3 records: outbound connections at creation time. C2 beacon detection. |
+| `query_sysmon_events` | Query any Sysmon Event ID within the last N minutes. |
+| `get_process_create_events` | Sysmon Event 1: cmdline, parent image, user, hashes. Forensic timeline. |
+| `get_network_events` | Sysmon Event 3: outbound connections at creation time. C2 beacon detection. |
 
 ### Stage 5 — VirusTotal (`vt_api_key` required)
 
 | Tool | Description |
 |---|---|
-| `lookup_hash` | SHA256 hash reputation check. Returns detection score (e.g. `5/72`). Results cached 24 h. Rate-limited to 4 req/min. |
+| `lookup_hash` | SHA256 hash reputation check. Returns detection score (e.g. `5/72`). Results cached 24 h. |
 
 ### Orchestration
 
 | Tool | Description |
 |---|---|
-| `run_full_hunt` | Executes all stages sequentially and returns a structured `HuntReport` with `CRITICAL/HIGH/MEDIUM/INFO` severity buckets, executive summary, and recommended actions. |
+| `run_full_hunt` | Runs all stages sequentially. Returns a structured `HuntReport` with `CRITICAL/HIGH/MEDIUM/INFO` severity buckets, executive summary, and recommended actions. |
 
 ---
 
@@ -480,8 +432,8 @@ then check its network activity with get_established_connections.
 
 ### Persistence check after suspected infection
 ```
-Run flag_autoruns_anomalies and list anything that's unsigned or has a VirusTotal hit.
-For each flagged entry, try to correlate with get_process_create_events for the last 120 minutes.
+Run flag_autoruns_anomalies and list anything that is unsigned or has a VirusTotal hit.
+For each flagged entry, correlate with get_process_create_events for the last 120 minutes.
 ```
 
 ### C2 beacon hunt
@@ -500,13 +452,32 @@ Cross-reference any unsigned spawned process with lookup_hash.
 
 ---
 
-## 12. Security Notes
+## 12. Security
 
-- **Env var redaction:** `get_process_detail` strips any environment variable whose name contains `token`, `secret`, `password`, `key`, `credential`, `auth`, `private`, `cert`, `jwt`, or `bearer`. The value is replaced with `[REDACTED]`.
-- **VT API key:** Never echoed in any tool response or written to the audit log.
-- **Audit log:** Every tool call is written to `%APPDATA%\ProcessGuard\audit.log` as JSONL with tool name, safe args, duration, and any error. Audit failures are silent and never crash the server.
-- **Admin rights:** Run Claude Desktop as Administrator to ensure Sysmon Event Log access and full process enumeration. ProcessGuard does not escalate privileges on its own.
-- **Private repo:** This repository is private. Do not share your clone URL or invite collaborators beyond trusted testers.
+### No listening ports
+
+ProcessGuard opens **zero listening ports**. It communicates exclusively over `stdin`/`stdout` with Claude Desktop — no TCP socket, no HTTP server, no named pipe exposed externally.
+
+### Prompt injection mitigations
+
+ProcessGuard collects raw OS data and passes it into Claude's context window. An adversary with local code execution could craft process names or registry keys that look like LLM instructions. The following mitigations are implemented:
+
+- **String truncation** — every string field is capped at 512 characters before leaving the MCP boundary.
+- **Control character stripping** — ASCII control characters (< 0x20, DEL) are stripped from all output.
+- **Config validation** — `sysmon_log` is validated against a strict character allowlist at startup to prevent PowerShell injection.
+- **Env var redaction** — `get_process_detail` redacts values for env vars matching: `token`, `secret`, `password`, `key`, `apikey`, `credential`, `auth`, `private`, `cert`, `jwt`, `bearer`.
+- **VT API key isolation** — never echoed in any tool response or written to the audit log.
+
+See [SECURITY.md](SECURITY.md) for the full threat model and responsible disclosure process.
+
+### Dependency verification
+
+After cloning, verify dependency integrity:
+
+```
+go mod verify
+govulncheck ./...
+```
 
 ---
 
@@ -514,21 +485,56 @@ Cross-reference any unsigned spawned process with lookup_hash.
 
 ```
 processguard-mcp.exe  (stdio JSON-RPC 2.0 — MCP protocol)
-├── internal/config        Config load + tool availability matrix
-├── internal/audit         Append-only JSONL audit log
+├── internal/config        Config load, validation, and tool availability matrix
+├── internal/audit         Append-only JSONL audit log (%APPDATA%\ProcessGuard\audit.log)
 ├── internal/geoip         MaxMind GeoLite2 wrapper + private-IP CIDR detection
 ├── internal/procex        Process Explorer path verification
 └── internal/tools
-    ├── tools.go           Tool registry + Call() dispatcher (with audit hook)
+    ├── tools.go           Registry + Call() dispatcher + output sanitisation boundary
     └── handlers/
         ├── processes.go   list_processes, get_process_detail, get_network_connections
         ├── modules.go     get_loaded_modules
-        ├── heuristics.go  get_suspicious_processes (name spoof, wrong path, hollow pattern)
+        ├── heuristics.go  get_suspicious_processes
         ├── startup.go     get_startup_entries
         ├── procex.go      get_process_tree, get_unsigned_processes
         ├── autoruns.go    get_autoruns_entries, flag_autoruns_anomalies
         ├── network.go     get_established_connections, get_foreign_connections
         ├── sysmon.go      query_sysmon_events, get_process_create_events, get_network_events
         ├── virustotal.go  lookup_hash (24h cache + 4 req/min rate limiter)
-        └── hunt.go        run_full_hunt orchestrator (Stages 1–5)
+        └── hunt.go        run_full_hunt orchestrator
 ```
+
+### Data flow
+
+```
+Claude Desktop ──stdin──► processguard-mcp.exe
+                                │
+                         tools.go (dispatch)
+                                │
+                         handler (OS call)
+                                │
+                    sanitiseJSON() ◄── all output passes through here
+                                │
+               Claude Desktop ◄──stdout──
+```
+
+---
+
+## 14. Contributing
+
+Contributions are welcome. Please:
+
+1. Fork the repository and create a feature branch.
+2. Follow existing code style — no new external dependencies without discussion.
+3. Add a handler test if you're adding a new tool.
+4. Open a pull request with a clear description of what changed and why.
+
+For security-related contributions, see [SECURITY.md](SECURITY.md) for the responsible disclosure process.
+
+---
+
+## 15. Licence
+
+ProcessGuard MCP is released under the [MIT Licence](LICENSE).
+
+**Important third-party restriction:** If you use ProcessGuard with Sysinternals tools (by configuring `procexp_path` or `autoruns_path`), the [Microsoft Sysinternals Licence Terms](https://learn.microsoft.com/en-us/sysinternals/license-terms) apply to those tools. That licence prohibits use in commercial products without a separate agreement with Microsoft. See [LICENSE](LICENSE) for full details.
