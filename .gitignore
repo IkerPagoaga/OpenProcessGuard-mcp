@@ -1,0 +1,53 @@
+# ============================================================
+# ProcessGuard MCP — .gitignore
+# ============================================================
+
+# ── Compiled binaries ────────────────────────────────────────
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ── Build output ─────────────────────────────────────────────
+/dist/
+/bin/
+/out/
+
+# ── Configuration (contains local paths & API keys) ─────────
+config.json
+# Keep config.example.json  — that one IS committed
+
+# ── GeoIP databases ──────────────────────────────────────────
+*.mmdb
+
+# ── VirusTotal / API key files ───────────────────────────────
+*.key
+*.secret
+secrets.*
+.env
+.env.*
+
+# ── Audit logs ───────────────────────────────────────────────
+*.log
+*.jsonl
+audit/
+
+# ── OS & editor noise ────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Go toolchain ─────────────────────────────────────────────
+# (go.sum IS committed — it locks transitive dependencies)
+vendor/
+
+# ── Test output ──────────────────────────────────────────────
+coverage.out
+coverage.html
+*.test
