@@ -22,6 +22,49 @@ ProcessGuard exposes live process telemetry, persistence checks, network analysi
 
 ---
 
+## Quick start
+
+**Option A — signed release (recommended).** Download the latest signed build from
+[Releases](https://github.com/IkerPagoaga/OpenProcessGuard-mcp/releases), verify it (below), then:
+
+```powershell
+.\install.ps1 -BinaryPath .\processguard-mcp.exe
+```
+
+**Option B — from source** (Go auto-selects the pinned `go1.25.11` toolchain):
+
+```powershell
+git clone https://github.com/IkerPagoaga/OpenProcessGuard-mcp.git
+cd OpenProcessGuard-mcp
+.\install.ps1
+```
+
+`install.ps1` installs the binary under `%LOCALAPPDATA%\ProcessGuard` and registers it with
+Claude Desktop. Restart Claude Desktop and ask it to run `list_processes`. **Native tools work
+immediately with no config file** — add `config.json` (copy `config.example.json`) only to enable
+the optional Autoruns / Sysmon / VirusTotal / GeoIP stages.
+
+### Verifying a release
+
+Every release ships a `SHA256SUMS` file signed with [cosign](https://docs.sigstore.dev/) keyless
+signing — no long-lived key; the signature is bound to this repo's GitHub Actions identity:
+
+```bash
+sha256sum -c processguard-mcp_<version>_SHA256SUMS
+cosign verify-blob \
+  --certificate-identity-regexp 'https://github.com/IkerPagoaga/OpenProcessGuard-mcp/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --signature processguard-mcp_<version>_SHA256SUMS.sig \
+  --certificate processguard-mcp_<version>_SHA256SUMS.pem \
+  processguard-mcp_<version>_SHA256SUMS
+```
+
+A CycloneDX SBOM is attached to every release for supply-chain audits.
+
+**More docs:** [ARCHITECTURE.md](ARCHITECTURE.md) · [LIMITATIONS.md](LIMITATIONS.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) · [SECURITY.md](SECURITY.md)
+
+---
+
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)

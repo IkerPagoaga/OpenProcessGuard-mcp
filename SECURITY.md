@@ -135,6 +135,12 @@ Instead:
 
 We aim to acknowledge reports within **72 hours** and provide a resolution timeline within **7 days**.
 
+GitHub Security Advisories are a private, encrypted channel between you and the maintainer, so no separate PGP key is required. If you would rather exchange encrypted email, request a PGP key in a draft advisory and one will be provided.
+
+### Release integrity
+
+Release binaries are published only through the automated release pipeline. Each release includes a `SHA256SUMS` file signed with cosign keyless signing (Sigstore), plus a CycloneDX SBOM. Verify both before running a downloaded binary — see **Verifying a release** in the README. Report any binary whose checksum or signature does not verify as a security issue.
+
 ---
 
 ## Changelog
