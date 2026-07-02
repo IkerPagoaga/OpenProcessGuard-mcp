@@ -72,16 +72,6 @@ type SuspiciousProcess struct {
 	Reason  string   `json:"reason"`
 }
 
-// containsFlag returns true if flags contains the given flag string.
-func containsFlag(flags []string, flag string) bool {
-	for _, f := range flags {
-		if f == flag {
-			return true
-		}
-	}
-	return false
-}
-
 func GetSuspiciousProcesses() (string, error) {
 	procs, err := process.Processes()
 	if err != nil {

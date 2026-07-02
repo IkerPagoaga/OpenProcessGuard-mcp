@@ -1,0 +1,80 @@
+# goreleaser configuration — reproducible, hashed, and cosign-keyless-signed
+# Windows releases. See https://goreleaser.com
+version: 2
+
+project_name: processguard-mcp
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: processguard-mcp
+    main: .
+    binary: processguard-mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Inject build metadata so `serverInfo.version` reflects the real release.
+    ldflags:
+      - -s -w
+      - -X main.Version={{ .Version }}
+      - -X main.Commit={{ .Commit }}
+      - -X main.BuildDate={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+
+archives:
+  - id: default
+    formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - SECURITY.md
+      - config.example.json
+
+# SHA256SUMS for every artifact.
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+
+# Software Bill of Materials (CycloneDX via syft) per archive.
+sboms:
+  - id: archive-sbom
+    artifacts: archive
+
+# Keyless cosign signature over the checksum file — Sigstore/Fulcio OIDC, no
+# long-lived key. Verifiable with `cosign verify-blob`.
+signs:
+  - id: cosign-keyless
+    cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+release:
+  github:
+    owner: IkerPagoaga
+    name: OpenProcessGuard-mcp
+  draft: true # human reviews before publishing
+  prerelease: auto
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

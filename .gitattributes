@@ -1,0 +1,18 @@
+# Normalise line endings — commit LF, so the tree is consistent across OSes and
+# gofmt/CI never see spurious CRLF diffs. (Go source is LF by convention.)
+* text=auto eol=lf
+*.go   text eol=lf
+*.mod  text eol=lf
+*.sum  text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# PowerShell scripts run on Windows — keep CRLF.
+*.ps1  text eol=crlf
+
+# Binary artifacts — never touch.
+*.exe   binary
+*.mmdb  binary
+*.png   binary
