@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -82,7 +83,9 @@ func main() {
 	encoder := json.NewEncoder(os.Stdout)
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
+		// Tolerate a stray UTF-8 BOM on the first frame (some clients/proxies
+		// prepend one); JSON-RPC itself is BOM-free UTF-8.
+		line := bytes.TrimPrefix(scanner.Bytes(), []byte{0xEF, 0xBB, 0xBF})
 		if len(line) == 0 {
 			continue
 		}
