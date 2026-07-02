@@ -1,13 +1,11 @@
 package config
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 )
 
 const configFileName = "config.json"
@@ -35,7 +33,12 @@ var configDefaults = Config{
 // Load resolves config in priority order:
 //  1. PROCEXP_PATH env var (legacy compat)
 //  2. config.json next to the binary
-//  3. Interactive prompt on first run
+//  3. Zero-config defaults (native Stage-0 tools only) when no config.json exists
+//
+// It never reads os.Stdin: under an MCP client stdin carries the JSON-RPC stream,
+// so a blocking prompt there would consume the initialize frame and hang the
+// handshake. A config.json that exists but is malformed is a fatal error rather
+// than a silent fall-through, for the same reason.
 func Load() (*Config, error) {
 	cfg := configDefaults
 
@@ -46,46 +49,35 @@ func Load() (*Config, error) {
 	}
 
 	exeDir, err := execDir()
-	if err == nil {
-		cfgPath := filepath.Join(exeDir, configFileName)
-		if data, err := os.ReadFile(cfgPath); err == nil {
-			if err := json.Unmarshal(data, &cfg); err == nil {
-				applyDefaults(&cfg)
-				if err := cfg.validate(); err != nil {
-					return nil, fmt.Errorf("config validation failed: %w", err)
-				}
-				return &cfg, nil
-			}
-		}
-	}
-
-	// Interactive first-run prompt
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "┌──────────────────────────────────────────────────────┐")
-	fmt.Fprintln(os.Stderr, "│  ProcessGuard MCP — First Run Setup                  │")
-	fmt.Fprintln(os.Stderr, "└──────────────────────────────────────────────────────┘")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "ProcessExplorer (procexp64.exe) path not found.")
-	fmt.Fprintln(os.Stderr, "Common locations:")
-	fmt.Fprintln(os.Stderr, "  C:\\Users\\<you>\\Downloads\\ProcessExplorer\\procexp64.exe")
-	fmt.Fprintln(os.Stderr, "  C:\\Tools\\SysinternalsSuite\\procexp64.exe")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprint(os.Stderr, "Enter full path to procexp64.exe (or press Enter to skip): ")
-
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
 	if err != nil {
-		return nil, fmt.Errorf("failed to read path: %w", err)
+		return nil, fmt.Errorf("cannot resolve executable directory: %w", err)
 	}
-	input = strings.TrimSpace(input)
-	cfg.ProcessExplorerPath = input
-	applyDefaults(&cfg)
+	cfgPath := filepath.Join(exeDir, configFileName)
 
-	if exeDir != "" {
-		save(filepath.Join(exeDir, configFileName), &cfg)
+	data, readErr := os.ReadFile(cfgPath)
+	switch {
+	case readErr == nil:
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("config.json at %s is present but not valid JSON: %w — fix or remove it", cfgPath, err)
+		}
+		applyDefaults(&cfg)
+		if err := cfg.validate(); err != nil {
+			return nil, fmt.Errorf("config validation failed: %w", err)
+		}
+		return &cfg, nil
+
+	case os.IsNotExist(readErr):
+		// Zero-config first run: native Stage-0 tools work immediately; optional
+		// stages (Autoruns / Sysmon / VirusTotal / GeoIP) stay disabled until a
+		// config.json is added next to the binary.
+		applyDefaults(&cfg)
+		fmt.Fprintf(os.Stderr, "ProcessGuard: no config.json at %s — running with native tools only. "+
+			"Copy config.example.json to enable the optional stages.\n", cfgPath)
+		return &cfg, nil
+
+	default:
+		return nil, fmt.Errorf("cannot read config.json at %s: %w", cfgPath, readErr)
 	}
-
-	return &cfg, nil
 }
 
 // validate checks that config values are within expected safe bounds.
@@ -101,14 +93,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.SysmonLog == "" {
 		cfg.SysmonLog = configDefaults.SysmonLog
 	}
-}
-
-func save(path string, cfg *Config) {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return
-	}
-	os.WriteFile(path, data, 0600)
 }
 
 func execDir() (string, error) {

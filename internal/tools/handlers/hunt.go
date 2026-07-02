@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"encoding/json"
@@ -18,20 +18,20 @@ const (
 
 // Finding is a single threat indicator surfaced during the hunt.
 type Finding struct {
-	Stage       int      `json:"stage"`         // 1=ProcEx, 2=Autoruns, 3=Network, 4=Sysmon
-	Severity    string   `json:"severity"`      // CRITICAL/HIGH/MEDIUM/INFO
-	Category    string   `json:"category"`      // e.g. "PROCESS_HOLLOWING", "C2_BEACON"
+	Stage       int      `json:"stage"`    // 1=ProcEx, 2=Autoruns, 3=Network, 4=Sysmon
+	Severity    string   `json:"severity"` // CRITICAL/HIGH/MEDIUM/INFO
+	Category    string   `json:"category"` // e.g. "PROCESS_HOLLOWING", "C2_BEACON"
 	Description string   `json:"description"`
-	Entity      string   `json:"entity"`        // PID, path, IP, or autorun key
+	Entity      string   `json:"entity"` // PID, path, IP, or autorun key
 	Flags       []string `json:"flags,omitempty"`
-	Confidence  string   `json:"confidence"`    // HIGH/MEDIUM/LOW
+	Confidence  string   `json:"confidence"` // HIGH/MEDIUM/LOW
 }
 
 // HuntReport is the structured output of run_full_hunt.
 type HuntReport struct {
-	ScanTimestamp    string    `json:"scan_timestamp"`
-	DurationMs       int64     `json:"duration_ms"`
-	ExecutiveSummary string    `json:"executive_summary"`
+	ScanTimestamp    string `json:"scan_timestamp"`
+	DurationMs       int64  `json:"duration_ms"`
+	ExecutiveSummary string `json:"executive_summary"`
 	Availability     struct {
 		ProcessExplorer bool `json:"process_explorer"`
 		Autoruns        bool `json:"autoruns"`
@@ -39,12 +39,12 @@ type HuntReport struct {
 		VirusTotal      bool `json:"virus_total"`
 		GeoIP           bool `json:"geo_ip"`
 	} `json:"tool_availability"`
-	Findings          []Finding `json:"findings"`
-	Critical          []Finding `json:"critical"`
-	High              []Finding `json:"high"`
-	Medium            []Finding `json:"medium"`
-	Info              []Finding `json:"info"`
-	RecommendedActions []string `json:"recommended_actions"`
+	Findings           []Finding `json:"findings"`
+	Critical           []Finding `json:"critical"`
+	High               []Finding `json:"high"`
+	Medium             []Finding `json:"medium"`
+	Info               []Finding `json:"info"`
+	RecommendedActions []string  `json:"recommended_actions"`
 }
 
 // RunFullHunt orchestrates all four hunting stages and returns a HuntReport.
@@ -79,6 +79,10 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 	stage4Findings := runStage4(cfg)
 	findings = append(findings, stage4Findings...)
 
+	// ── Stage 5: VirusTotal Hash Escalation ────────────────────────
+	stage5Findings := runStage5(cfg)
+	findings = append(findings, stage5Findings...)
+
 	// Bucket findings by severity
 	report.Findings = findings
 	for _, f := range findings {
@@ -95,15 +99,27 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 	}
 
 	// Ensure no nil slices in JSON output
-	if report.Critical == nil { report.Critical = []Finding{} }
-	if report.High == nil { report.High = []Finding{} }
-	if report.Medium == nil { report.Medium = []Finding{} }
-	if report.Info == nil { report.Info = []Finding{} }
-	if report.Findings == nil { report.Findings = []Finding{} }
+	if report.Critical == nil {
+		report.Critical = []Finding{}
+	}
+	if report.High == nil {
+		report.High = []Finding{}
+	}
+	if report.Medium == nil {
+		report.Medium = []Finding{}
+	}
+	if report.Info == nil {
+		report.Info = []Finding{}
+	}
+	if report.Findings == nil {
+		report.Findings = []Finding{}
+	}
 
+	// DurationMs must be set BEFORE buildSummary — the summary embeds it, and
+	// the struct is passed by value, so setting it afterwards reported 0ms.
+	report.DurationMs = time.Since(start).Milliseconds()
 	report.RecommendedActions = buildRecommendations(report)
 	report.ExecutiveSummary = buildSummary(report)
-	report.DurationMs = time.Since(start).Milliseconds()
 
 	result, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -128,9 +144,13 @@ func runStage1(cfg *config.Config) []Finding {
 	for _, p := range procs {
 		severity := SeverityMedium
 		for _, flag := range p.Flags {
-			if flag == FlagNameSpoof || flag == FlagWrongPath || flag == FlagNoPath {
-				severity = SeverityHigh
-				break
+			switch flag {
+			case FlagHollowPattern:
+				severity = SeverityCritical
+			case FlagNameSpoof, FlagWrongPath:
+				if severity != SeverityCritical {
+					severity = SeverityHigh
+				}
 			}
 		}
 		findings = append(findings, Finding{
@@ -174,7 +194,9 @@ func runStage2(cfg *config.Config) []Finding {
 		severity := SeverityMedium
 		if e.VTDetections > 0 {
 			severity = SeverityCritical
-		} else if !e.IsVerified {
+		} else if e.SignerKnown && !e.IsVerified {
+			// Only escalate on a KNOWN-unsigned entry; an absent signer column
+			// means unknown, not unsigned.
 			severity = SeverityHigh
 		}
 		findings = append(findings, Finding{
@@ -359,6 +381,72 @@ func lowerBase(path string) string {
 		result[i] = c
 	}
 	return string(result)
+}
+
+// runStage5 performs VirusTotal hash lookups on autoruns entries that carry
+// a SHA256. Any entry with VT detections is escalated to CRITICAL.
+// Skipped silently when vt_api_key is not configured.
+func runStage5(cfg *config.Config) []Finding {
+	var findings []Finding
+	if !cfg.Availability().VirusTotal {
+		findings = append(findings, Finding{
+			Stage:       5,
+			Severity:    SeverityInfo,
+			Category:    "TOOL_UNAVAILABLE",
+			Description: "VirusTotal API key not configured — hash reputation scoring skipped. Add vt_api_key to config.json.",
+			Entity:      "virustotal",
+			Confidence:  "HIGH",
+		})
+		return findings
+	}
+	if !cfg.Availability().Autoruns {
+		return findings // nothing to score without autoruns hashes
+	}
+
+	raw, err := GetAutorunsEntries(cfg)
+	if err != nil {
+		return findings
+	}
+	var entries []AutorunEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return findings
+	}
+
+	checked := 0
+	for _, e := range entries {
+		if e.SHA256 == "" || len(e.SHA256) != 64 {
+			continue
+		}
+		if checked >= 10 { // cap VT calls per hunt to stay within free-tier limits
+			break
+		}
+		checked++
+		vtRaw, err := LookupHash(cfg, e.SHA256)
+		if err != nil {
+			continue
+		}
+		var report VTReport
+		if err := json.Unmarshal([]byte(vtRaw), &report); err != nil {
+			continue
+		}
+		if report.Malicious == 0 {
+			continue
+		}
+		severity := SeverityHigh
+		if report.Malicious >= 5 {
+			severity = SeverityCritical
+		}
+		findings = append(findings, Finding{
+			Stage:       5,
+			Severity:    severity,
+			Category:    "VT_DETECTION",
+			Description: fmt.Sprintf("VirusTotal: autorun entry %q scored %s — %d engine(s) flagged as malicious", e.EntryName, report.Score, report.Malicious),
+			Entity:      fmt.Sprintf("%s @ %s", e.EntryName, e.EntryLocation),
+			Flags:       []string{"VT_HIT", "PERSISTENCE_MECHANISM"},
+			Confidence:  "HIGH",
+		})
+	}
+	return findings
 }
 
 func buildRecommendations(r HuntReport) []string {

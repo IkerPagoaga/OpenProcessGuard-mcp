@@ -11,31 +11,32 @@ import (
 
 // Heuristic flags
 const (
-	FlagNameSpoof       = "NAME_SPOOF"          // name mimics a known system process but has chars swapped
-	FlagWrongPath       = "WRONG_PATH"           // known system process running outside System32/SysWOW64
-	FlagTempPath        = "SUSPICIOUS_PATH"      // binary in Temp, AppData, Downloads, or Recycle Bin
-	FlagNoPath          = "NO_EXE_PATH"          // could not resolve executable path (common in hollow processes)
-	FlagSuspiciousChild = "SUSPICIOUS_PARENT"    // unusual parent (e.g. Office spawning cmd/powershell)
+	FlagNameSpoof       = "NAME_SPOOF"        // name mimics a known system process but has chars swapped
+	FlagWrongPath       = "WRONG_PATH"        // known system process running outside System32/SysWOW64
+	FlagTempPath        = "SUSPICIOUS_PATH"   // binary in Temp, AppData, Downloads, or Recycle Bin
+	FlagNoPath          = "NO_EXE_PATH"       // could not resolve executable path (common in hollow processes)
+	FlagSuspiciousChild = "SUSPICIOUS_PARENT" // unusual parent (e.g. Office spawning cmd/powershell)
+	FlagHollowPattern   = "HOLLOW_PATTERN"    // NO_PATH + WRONG_PATH combo — strong process-hollowing signal
 )
 
 // systemProcessPaths: legitimate system processes and their expected path fragments
 var systemProcessPaths = map[string][]string{
-	"svchost.exe":      {`\system32\`, `\syswow64\`},
-	"lsass.exe":        {`\system32\`},
-	"csrss.exe":        {`\system32\`},
-	"wininit.exe":      {`\system32\`},
-	"winlogon.exe":     {`\system32\`},
-	"services.exe":     {`\system32\`},
-	"smss.exe":         {`\system32\`},
-	"spoolsv.exe":      {`\system32\`},
-	"taskhost.exe":     {`\system32\`},
-	"taskhostw.exe":    {`\system32\`},
-	"explorer.exe":     {`\windows\`},
-	"conhost.exe":      {`\system32\`},
-	"dllhost.exe":      {`\system32\`},
-	"rundll32.exe":     {`\system32\`, `\syswow64\`},
-	"powershell.exe":   {`\system32\`, `\syswow64\`},
-	"cmd.exe":          {`\system32\`, `\syswow64\`},
+	"svchost.exe":    {`\system32\`, `\syswow64\`},
+	"lsass.exe":      {`\system32\`},
+	"csrss.exe":      {`\system32\`},
+	"wininit.exe":    {`\system32\`},
+	"winlogon.exe":   {`\system32\`},
+	"services.exe":   {`\system32\`},
+	"smss.exe":       {`\system32\`},
+	"spoolsv.exe":    {`\system32\`},
+	"taskhost.exe":   {`\system32\`},
+	"taskhostw.exe":  {`\system32\`},
+	"explorer.exe":   {`\windows\`},
+	"conhost.exe":    {`\system32\`},
+	"dllhost.exe":    {`\system32\`},
+	"rundll32.exe":   {`\system32\`, `\syswow64\`},
+	"powershell.exe": {`\system32\`, `\syswow64\`},
+	"cmd.exe":        {`\system32\`, `\syswow64\`},
 }
 
 // knownSpoof: common leet-speak or lookalike swaps attackers use
@@ -53,14 +54,14 @@ var suspiciousDirs = []string{
 
 // Suspicious parent-child combos: parent -> bad child
 var suspiciousParentChild = map[string][]string{
-	"winword.exe":   {"cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe", "mshta.exe"},
-	"excel.exe":     {"cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe"},
-	"outlook.exe":   {"cmd.exe", "powershell.exe", "mshta.exe"},
-	"powerpnt.exe":  {"cmd.exe", "powershell.exe"},
-	"acrord32.exe":  {"cmd.exe", "powershell.exe"},
-	"chrome.exe":    {"cmd.exe", "powershell.exe"},
-	"firefox.exe":   {"cmd.exe", "powershell.exe"},
-	"iexplore.exe":  {"cmd.exe", "powershell.exe", "wscript.exe"},
+	"winword.exe":  {"cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe", "mshta.exe"},
+	"excel.exe":    {"cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe"},
+	"outlook.exe":  {"cmd.exe", "powershell.exe", "mshta.exe"},
+	"powerpnt.exe": {"cmd.exe", "powershell.exe"},
+	"acrord32.exe": {"cmd.exe", "powershell.exe"},
+	"chrome.exe":   {"cmd.exe", "powershell.exe"},
+	"firefox.exe":  {"cmd.exe", "powershell.exe"},
+	"iexplore.exe": {"cmd.exe", "powershell.exe", "wscript.exe"},
 }
 
 type SuspiciousProcess struct {
@@ -69,6 +70,16 @@ type SuspiciousProcess struct {
 	ExePath string   `json:"exe_path"`
 	Flags   []string `json:"flags"`
 	Reason  string   `json:"reason"`
+}
+
+// containsFlag returns true if flags contains the given flag string.
+func containsFlag(flags []string, flag string) bool {
+	for _, f := range flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
 }
 
 func GetSuspiciousProcesses() (string, error) {

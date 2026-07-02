@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -28,35 +29,56 @@ import (
 // These transforms are applied to the final JSON blob returned by every tool,
 // so no individual handler needs to worry about it.
 
-const maxFieldLen = 512 // max runes per string value in any tool response
+const (
+	maxFieldLen = 512 // default cap: runes per string value in a tool response
+
+	// maxForensicFieldLen is the cap for evidence-bearing fields. The whole
+	// point of the tool is to surface these — a full command line, a hash set,
+	// a Sysmon XML blob — so truncating them to 512 runes would cut off exactly
+	// the data an analyst needs.
+	maxForensicFieldLen = 16384
+)
+
+// forensicKeys are output field names (lower-cased) that carry forensic evidence
+// and therefore get the larger cap instead of the default 512.
+var forensicKeys = map[string]bool{
+	"command_line": true, "cmdline": true, "hashes": true, "sha256": true,
+	"raw_xml": true, "xml": true, "path": true, "exe_path": true,
+	"image": true, "image_path": true, "image_loaded": true,
+	"launch_string": true, "parent_image": true, "permalink": true,
+}
 
 // sanitiseOutput walks every string in a JSON-decoded interface{} tree and
-// applies the sanitisation rules above. The returned value is safe to pass
-// to Claude's context window.
-func sanitiseOutput(v interface{}) interface{} {
+// applies the sanitisation rules above under a per-field length cap. A map value
+// under a forensic key (and any nested value beneath it) gets the larger cap.
+func sanitiseOutput(v interface{}, maxLen int) interface{} {
 	switch t := v.(type) {
 	case string:
-		return sanitiseString(t)
+		return sanitiseString(t, maxLen)
 	case []interface{}:
 		for i, item := range t {
-			t[i] = sanitiseOutput(item)
+			t[i] = sanitiseOutput(item, maxLen)
 		}
 		return t
 	case map[string]interface{}:
 		for k, val := range t {
-			t[k] = sanitiseOutput(val)
+			childMax := maxLen
+			if forensicKeys[strings.ToLower(k)] {
+				childMax = maxForensicFieldLen
+			}
+			t[k] = sanitiseOutput(val, childMax)
 		}
 		return t
 	}
 	return v
 }
 
-func sanitiseString(s string) string {
+func sanitiseString(s string, maxLen int) string {
 	runes := []rune(s)
 
 	// Truncate
-	if len(runes) > maxFieldLen {
-		runes = runes[:maxFieldLen]
+	if maxLen > 0 && len(runes) > maxLen {
+		runes = runes[:maxLen]
 	}
 
 	// Strip non-printable characters
@@ -78,20 +100,25 @@ func sanitiseString(s string) string {
 }
 
 // sanitiseJSON deserialises a JSON string, sanitises every string value in
-// the resulting tree, then re-serialises it. Returns the original string on
-// any parse error (handlers already return valid JSON).
+// the resulting tree, then re-serialises it. HTML escaping is disabled so that
+// forensic values containing <, >, or & render literally instead of as <
+// noise. Returns the original string on any parse error (handlers already
+// return valid JSON).
 func sanitiseJSON(raw string) string {
 	var v interface{}
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
 		// Not JSON — apply plain string sanitisation
-		return sanitiseString(raw)
+		return sanitiseString(raw, maxFieldLen)
 	}
-	clean := sanitiseOutput(v)
-	out, err := json.Marshal(clean)
-	if err != nil {
-		return sanitiseString(raw)
+	clean := sanitiseOutput(v, maxFieldLen)
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(clean); err != nil {
+		return sanitiseString(raw, maxFieldLen)
 	}
-	return string(out)
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 // ── Tool registry ─────────────────────────────────────────────────────────────
@@ -140,12 +167,12 @@ func Registry() []ToolDef {
 		// ── Stage 1: Process Explorer ────────────────────────────────────────
 		{
 			Name:        "get_process_tree",
-			Description: "Return the full parent-child process tree with signing status and company info. Requires procexp_path in config.json. Falls back to PowerShell if Process Explorer is unavailable.",
+			Description: "Return the full parent-child process tree with Authenticode signing status. Uses Windows Get-AuthenticodeSignature directly — no external Sysinternals tools required.",
 			InputSchema: emptySchema(),
 		},
 		{
 			Name:        "get_unsigned_processes",
-			Description: "Return all running processes that are not digitally signed by a trusted publisher. Unsigned processes in system paths are a primary malware indicator. Requires procexp_path for full data.",
+			Description: "Return all running processes whose Authenticode signature is absent or untrusted — a primary malware indicator in system paths. No external Sysinternals tools required.",
 			InputSchema: emptySchema(),
 		},
 
@@ -207,7 +234,7 @@ func Registry() []ToolDef {
 		// ── Stage 5: VirusTotal ───────────────────────────────────────────────
 		{
 			Name:        "lookup_hash",
-			Description: "Look up a SHA256 file hash on VirusTotal and return the detection score (e.g. '5/72'). Results are cached locally for 24 hours. Requires vt_api_key in config.json.",
+			Description: "Look up a SHA256 file hash on VirusTotal and return the detection score (e.g. '5/72'). Results are cached in-memory for 24 hours (cleared on restart). Requires vt_api_key in config.json.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

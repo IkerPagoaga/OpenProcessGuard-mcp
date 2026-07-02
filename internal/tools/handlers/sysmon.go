@@ -3,32 +3,33 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"processguard-mcp/internal/config"
+	"processguard-mcp/internal/parse"
+	"processguard-mcp/internal/run"
 )
 
 // SysmonEvent holds a parsed Sysmon Windows Event Log entry.
 type SysmonEvent struct {
-	EventID     int    `json:"event_id"`
-	EventName   string `json:"event_name"`
-	Timestamp   string `json:"timestamp"`
-	ProcessID   int    `json:"pid,omitempty"`
-	ProcessName string `json:"process_name,omitempty"`
-	CommandLine string `json:"command_line,omitempty"`
-	ParentImage string `json:"parent_image,omitempty"`
-	User        string `json:"user,omitempty"`
-	Hashes      string `json:"hashes,omitempty"`
-	DestIP      string `json:"dest_ip,omitempty"`
-	DestPort    int    `json:"dest_port,omitempty"`
+	EventID      int    `json:"event_id"`
+	EventName    string `json:"event_name"`
+	Timestamp    string `json:"timestamp"`
+	ProcessID    int    `json:"pid,omitempty"`
+	ProcessName  string `json:"process_name,omitempty"`
+	CommandLine  string `json:"command_line,omitempty"`
+	ParentImage  string `json:"parent_image,omitempty"`
+	User         string `json:"user,omitempty"`
+	Hashes       string `json:"hashes,omitempty"`
+	DestIP       string `json:"dest_ip,omitempty"`
+	DestPort     int    `json:"dest_port,omitempty"`
 	DestHostname string `json:"dest_hostname,omitempty"`
-	Protocol    string `json:"protocol,omitempty"`
-	ImageLoaded string `json:"image_loaded,omitempty"`
-	Signed      string `json:"signed,omitempty"`
-	Signature   string `json:"signature,omitempty"`
+	Protocol     string `json:"protocol,omitempty"`
+	ImageLoaded  string `json:"image_loaded,omitempty"`
+	Signed       string `json:"signed,omitempty"`
+	Signature    string `json:"signature,omitempty"`
 	// RawXML is only populated when structured field extraction fails entirely.
 	RawXML string `json:"raw_xml,omitempty"`
 }
@@ -85,9 +86,7 @@ try {
     '[]'
 }`, cfg.SysmonLog, eventID, sinceStr)
 
-	out, err := exec.Command(
-		"powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd,
-	).Output()
+	out, err := run.PowerShell(psCmd)
 	if err != nil {
 		return "", fmt.Errorf("Get-WinEvent failed: %w — is Sysmon installed and running?", err)
 	}
@@ -139,67 +138,43 @@ func GetNetworkEvents(cfg *config.Config, sinceMinutes int) (string, error) {
 	return QuerySysmonEvents(cfg, 3, sinceMinutes)
 }
 
-// parseSysmonXML extracts key fields from a Sysmon event XML string.
-// Sysmon event XML uses both single-quoted and double-quoted attribute values
-// depending on the version and context — we handle both.
-// RawXML is only kept when no structured fields could be extracted at all.
+// parseSysmonXML extracts key fields from a Sysmon event XML string using a
+// real XML parser (parse.SysmonFields), so entities are unescaped and values
+// containing markup-like text (a command line with "</Data>") survive intact.
+// RawXML is only kept when parsing fails or no meaningful field was found.
 func parseSysmonXML(xmlStr string, eventID int) SysmonEvent {
 	e := SysmonEvent{
 		EventID:   eventID,
 		EventName: sysmonEventNames[eventID],
 	}
 
-	// extract pulls the value of a named <Data> element, handling both quote styles.
-	extract := func(name string) string {
-		for _, q := range []string{"'", `"`} {
-			needle := `<Data Name=` + q + name + q + `>`
-			idx := strings.Index(xmlStr, needle)
-			if idx == -1 {
-				continue
-			}
-			start := idx + len(needle)
-			end := strings.Index(xmlStr[start:], "</Data>")
-			if end == -1 {
-				continue
-			}
-			return strings.TrimSpace(xmlStr[start : start+end])
-		}
-		return ""
+	ts, fields, ok := parse.SysmonFields(xmlStr)
+	if !ok {
+		e.RawXML = xmlStr
+		return e
 	}
-
-	// Timestamp: attribute value may be single- or double-quoted.
-	for _, q := range []string{"'", `"`} {
-		needle := `SystemTime=` + q
-		if idx := strings.Index(xmlStr, needle); idx >= 0 {
-			start := idx + len(needle)
-			if end := strings.Index(xmlStr[start:], q); end >= 0 {
-				e.Timestamp = xmlStr[start : start+end]
-				break
-			}
-		}
-	}
+	e.Timestamp = ts
 
 	// Fields common to many event types
-	e.ProcessName = extract("Image")
-	e.ProcessID, _ = strconv.Atoi(extract("ProcessId"))
-	e.CommandLine = extract("CommandLine")
-	e.ParentImage = extract("ParentImage")
-	e.User = extract("User")
-	e.Hashes = extract("Hashes")
+	e.ProcessName = fields["Image"]
+	e.ProcessID, _ = strconv.Atoi(fields["ProcessId"])
+	e.CommandLine = fields["CommandLine"]
+	e.ParentImage = fields["ParentImage"]
+	e.User = fields["User"]
+	e.Hashes = fields["Hashes"]
 
 	// Network events (ID 3)
-	e.DestIP = extract("DestinationIp")
-	e.DestHostname = extract("DestinationHostname")
-	e.Protocol = extract("Protocol")
-	e.DestPort, _ = strconv.Atoi(extract("DestinationPort"))
+	e.DestIP = fields["DestinationIp"]
+	e.DestHostname = fields["DestinationHostname"]
+	e.Protocol = fields["Protocol"]
+	e.DestPort, _ = strconv.Atoi(fields["DestinationPort"])
 
 	// Image load events (ID 7)
-	e.ImageLoaded = extract("ImageLoaded")
-	e.Signed = extract("Signed")
-	e.Signature = extract("Signature")
+	e.ImageLoaded = fields["ImageLoaded"]
+	e.Signed = fields["Signed"]
+	e.Signature = fields["Signature"]
 
 	// Only attach raw XML when we couldn't extract any meaningful field.
-	// This avoids bloating every response with multi-KB XML strings.
 	if e.ProcessName == "" && e.DestIP == "" && e.ImageLoaded == "" && e.Timestamp == "" {
 		e.RawXML = xmlStr
 	}

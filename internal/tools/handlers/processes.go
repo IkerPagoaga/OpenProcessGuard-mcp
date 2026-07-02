@@ -3,11 +3,11 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
-	"runtime"
 	"strings"
 
 	"github.com/shirou/gopsutil/v3/process"
+	"processguard-mcp/internal/parse"
+	"processguard-mcp/internal/run"
 )
 
 // secretPatterns are env var name substrings that indicate sensitive values.
@@ -154,6 +154,7 @@ func GetProcessDetail(pid int) (string, error) {
 	return string(out), nil
 }
 
+// NetworkConn is the raw connection view returned by get_network_connections.
 type NetworkConn struct {
 	PID         int32  `json:"pid"`
 	ProcessName string `json:"process_name"`
@@ -163,52 +164,38 @@ type NetworkConn struct {
 	Status      string `json:"status"`
 }
 
+// GetNetworkConnections returns all active TCP/UDP connections with PID and process name.
 func GetNetworkConnections() (string, error) {
-	if runtime.GOOS != "windows" {
-		return "", fmt.Errorf("network connection listing requires Windows")
+	// Build PID → name map
+	pidNames := map[int32]string{}
+	procs, _ := process.Processes()
+	for _, p := range procs {
+		if name, err := p.Name(); err == nil {
+			pidNames[p.Pid] = name
+		}
 	}
 
-	// Use netstat to get connections with PID
-	out, err := exec.Command("netstat", "-ano").Output()
+	out, err := run.Tool("netstat", "-ano")
 	if err != nil {
 		return "", fmt.Errorf("netstat failed: %w", err)
 	}
 
-	// Build a PID -> name map
-	pidNames := map[string]string{}
-	procs, _ := process.Processes()
-	for _, p := range procs {
-		if name, err := p.Name(); err == nil {
-			pidNames[fmt.Sprintf("%d", p.Pid)] = name
-		}
-	}
-
 	var conns []NetworkConn
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		proto := fields[0]
-		if proto != "TCP" && proto != "UDP" {
-			continue
-		}
+	for _, c := range parse.Netstat(string(out)) {
 		conn := NetworkConn{
-			Protocol:  proto,
-			LocalAddr: fields[1],
+			Protocol:   c.Protocol,
+			LocalAddr:  c.LocalAddr,
+			RemoteAddr: c.RemoteAddr,
+			Status:     c.Status,
 		}
-		if proto == "TCP" && len(fields) >= 5 {
-			conn.RemoteAddr = fields[2]
-			conn.Status = fields[3]
-			pid := fields[4]
-			conn.ProcessName = pidNames[pid]
-		} else if proto == "UDP" && len(fields) >= 4 {
-			conn.RemoteAddr = "*"
-			pid := fields[3]
-			conn.ProcessName = pidNames[pid]
+		if c.HasPID {
+			conn.PID = c.PID
+			conn.ProcessName = pidNames[c.PID]
 		}
 		conns = append(conns, conn)
+	}
+	if conns == nil {
+		conns = []NetworkConn{}
 	}
 
 	result, err := json.MarshalIndent(conns, "", "  ")

@@ -3,26 +3,26 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
-	"strconv"
 	"strings"
 
+	"github.com/shirou/gopsutil/v3/process"
 	"processguard-mcp/internal/config"
 	"processguard-mcp/internal/geoip"
-	"github.com/shirou/gopsutil/v3/process"
+	"processguard-mcp/internal/parse"
+	"processguard-mcp/internal/run"
 )
 
 // EnrichedConnection is a network connection with process name, state filter,
 // and optional GeoIP context.
 type EnrichedConnection struct {
-	PID         int32          `json:"pid"`
-	ProcessName string         `json:"process_name"`
-	Protocol    string         `json:"protocol"`
-	LocalAddr   string         `json:"local_addr"`
-	RemoteAddr  string         `json:"remote_addr"`
-	Status      string         `json:"status"`
+	PID         int32           `json:"pid"`
+	ProcessName string          `json:"process_name"`
+	Protocol    string          `json:"protocol"`
+	LocalAddr   string          `json:"local_addr"`
+	RemoteAddr  string          `json:"remote_addr"`
+	Status      string          `json:"status"`
 	GeoIP       *geoip.Location `json:"geoip,omitempty"`
-	Flags       []string       `json:"flags,omitempty"`
+	Flags       []string        `json:"flags,omitempty"`
 }
 
 // GetEstablishedConnections returns only ESTABLISHED TCP connections,
@@ -50,18 +50,30 @@ func GetEstablishedConnections(cfg *config.Config) (string, error) {
 
 // GetForeignConnections returns ESTABLISHED connections to non-private IPs,
 // which is the primary C2 / data-exfiltration indicator.
+//
+// Private-IP filtering is always applied regardless of whether geoip_db is
+// configured.  GeoIP country/city enrichment only happens when geoip_db points
+// to a valid MaxMind mmdb file.
 func GetForeignConnections(cfg *config.Config) (string, error) {
 	all, err := collectConnections(cfg)
 	if err != nil {
 		return "", err
 	}
 
+	// Always open a DB so Lookup() can detect private ranges.
+	// When geoip_db is empty, Open("") returns a no-op DB that only
+	// classifies private vs public — no country data, no file required.
 	var db *geoip.DB
+	var geoEnabled bool
 	if cfg.GeoIPDB != "" {
-		db, _ = geoip.Open(cfg.GeoIPDB)
-		if db != nil {
+		if opened, err := geoip.Open(cfg.GeoIPDB); err == nil {
+			db = opened
+			geoEnabled = true
 			defer db.Close()
 		}
+	}
+	if db == nil {
+		db, _ = geoip.Open("") // no-op: private-range detection only
 	}
 
 	var foreign []EnrichedConnection
@@ -69,8 +81,7 @@ func GetForeignConnections(cfg *config.Config) (string, error) {
 		if !strings.EqualFold(c.Status, "ESTABLISHED") {
 			continue
 		}
-		// Extract IP from "1.2.3.4:port" format
-		remoteIP := remoteIPFromAddr(c.RemoteAddr)
+		remoteIP := parse.RemoteIP(c.RemoteAddr)
 		if remoteIP == "" || remoteIP == "*" || remoteIP == "0.0.0.0" {
 			continue
 		}
@@ -79,7 +90,10 @@ func GetForeignConnections(cfg *config.Config) (string, error) {
 			if loc.IsPrivate {
 				continue
 			}
-			c.GeoIP = &loc
+			if geoEnabled {
+				locCopy := loc
+				c.GeoIP = &locCopy
+			}
 		}
 		c.Flags = append(c.Flags, "FOREIGN_CONNECTION")
 		foreign = append(foreign, c)
@@ -97,7 +111,6 @@ func GetForeignConnections(cfg *config.Config) (string, error) {
 // collectConnections runs netstat and returns all connections enriched with
 // process names. Uses tcpvcon.exe if configured, falls back to netstat.
 func collectConnections(cfg *config.Config) ([]EnrichedConnection, error) {
-	// Build PID -> name map
 	pidNames := map[int32]string{}
 	procs, _ := process.Processes()
 	for _, p := range procs {
@@ -114,60 +127,27 @@ func collectConnections(cfg *config.Config) ([]EnrichedConnection, error) {
 	return netstatConnections(pidNames)
 }
 
-// netstatConnections parses netstat -ano output.
+// netstatConnections runs `netstat -ano` (under a bounded timeout) and maps the
+// parsed rows onto enriched connections with process names.
 func netstatConnections(pidNames map[int32]string) ([]EnrichedConnection, error) {
-	out, err := exec.Command("netstat", "-ano").Output()
+	out, err := run.Tool("netstat", "-ano")
 	if err != nil {
 		return nil, fmt.Errorf("netstat failed: %w", err)
 	}
 
 	var conns []EnrichedConnection
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		proto := strings.ToUpper(fields[0])
-		if proto != "TCP" && proto != "UDP" {
-			continue
-		}
+	for _, c := range parse.Netstat(string(out)) {
 		conn := EnrichedConnection{
-			Protocol:  proto,
-			LocalAddr: fields[1],
+			Protocol:   c.Protocol,
+			LocalAddr:  c.LocalAddr,
+			RemoteAddr: c.RemoteAddr,
+			Status:     c.Status,
 		}
-		if proto == "TCP" && len(fields) >= 5 {
-			conn.RemoteAddr = fields[2]
-			conn.Status = fields[3]
-			if pid, err := strconv.ParseInt(fields[4], 10, 32); err == nil {
-				conn.PID = int32(pid)
-				conn.ProcessName = pidNames[int32(pid)]
-			}
-		} else if proto == "UDP" && len(fields) >= 4 {
-			conn.RemoteAddr = "*"
-			conn.Status = "LISTENING"
-			if pid, err := strconv.ParseInt(fields[3], 10, 32); err == nil {
-				conn.PID = int32(pid)
-				conn.ProcessName = pidNames[int32(pid)]
-			}
+		if c.HasPID {
+			conn.PID = c.PID
+			conn.ProcessName = pidNames[c.PID]
 		}
 		conns = append(conns, conn)
 	}
 	return conns, nil
-}
-
-func remoteIPFromAddr(addr string) string {
-	if addr == "" || addr == "*" {
-		return ""
-	}
-	// Handle IPv6: [::1]:80
-	if strings.HasPrefix(addr, "[") {
-		if i := strings.LastIndex(addr, "]"); i >= 0 {
-			return addr[1:i]
-		}
-	}
-	// IPv4: 1.2.3.4:80
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		return addr[:i]
-	}
-	return addr
 }

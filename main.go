@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -13,6 +13,17 @@ import (
 	"processguard-mcp/internal/procex"
 	"processguard-mcp/internal/tools"
 )
+
+// Build metadata, injected at release time via -ldflags. Defaults identify a
+// local/dev build so `serverInfo.version` is always meaningful.
+var (
+	Version   = "dev"
+	Commit    = "none"
+	BuildDate = "unknown"
+)
+
+// defaultProtocolVersion is used only when the client does not request one.
+const defaultProtocolVersion = "2024-11-05"
 
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -34,35 +45,37 @@ type RPCError struct {
 }
 
 func main() {
-	log.SetOutput(os.Stderr)
+	// Structured logs go to stderr; stdout is reserved for JSON-RPC framing.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		slog.Error("failed to load config", "err", err)
+		os.Exit(1)
 	}
 
 	if err := procex.VerifyPath(cfg.ProcessExplorerPath); err != nil {
-		log.Printf("⚠ ProcessExplorer not found at %q — Stage 1 tools will use fallback", cfg.ProcessExplorerPath)
+		slog.Warn("ProcessExplorer not configured — signing derived via Get-AuthenticodeSignature", "path", cfg.ProcessExplorerPath)
 	}
 
-	// Initialise audit log if enabled
 	if cfg.AuditLog {
 		if err := audit.Init(); err != nil {
-			log.Printf("⚠ Audit log init failed: %v (continuing without audit)", err)
+			slog.Warn("audit log init failed; continuing without audit", "err", err)
 		} else {
 			defer audit.Close()
-			log.Printf("Audit log active")
+			slog.Info("audit log active")
 		}
 	}
 
 	avail := cfg.Availability()
-	log.Printf("ProcessGuard MCP v2.0 ready")
-	log.Printf("  Stage 1 (Process Explorer): %v", avail.ProcessExplorer)
-	log.Printf("  Stage 2 (Autoruns):         %v", avail.Autoruns)
-	log.Printf("  Stage 3 (TCPView):          %v", avail.TCPView)
-	log.Printf("  Stage 4 (Sysmon):           %v", avail.Sysmon)
-	log.Printf("  VirusTotal:                 %v", avail.VirusTotal)
-	log.Printf("  GeoIP:                      %v", avail.GeoIP)
+	slog.Info("ProcessGuard MCP ready",
+		"version", Version, "commit", Commit, "built", BuildDate,
+		"process_explorer", avail.ProcessExplorer,
+		"autoruns", avail.Autoruns,
+		"sysmon", avail.Sysmon,
+		"virustotal", avail.VirusTotal,
+		"geoip", avail.GeoIP,
+	)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
@@ -76,20 +89,16 @@ func main() {
 
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
-			log.Printf("parse error: %v | raw: %s", err, string(line))
+			slog.Error("json-rpc parse error", "err", err)
 			writeError(encoder, nil, -32700, "Parse error")
 			continue
 		}
 
 		if strings.HasPrefix(req.Method, "notifications/") {
-			log.Printf("notification: %s (ignored)", req.Method)
 			continue
 		}
 
 		if len(req.ID) == 0 || string(req.ID) == "null" {
-			if req.Method != "" {
-				log.Printf("null-id message: %s (ignored)", req.Method)
-			}
 			continue
 		}
 
@@ -105,7 +114,8 @@ func main() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Fatalf("stdin scanner error: %v", err)
+		slog.Error("stdin scanner error", "err", err)
+		os.Exit(1)
 	}
 }
 
@@ -113,14 +123,25 @@ func dispatch(cfg *config.Config, req Request) (interface{}, *RPCError) {
 	switch req.Method {
 
 	case "initialize":
+		// Echo back the client's requested protocol version when it sends one,
+		// rather than forcing a hardcoded value the client may not speak.
+		protocolVersion := defaultProtocolVersion
+		if len(req.Params) > 0 {
+			var p struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			if json.Unmarshal(req.Params, &p) == nil && p.ProtocolVersion != "" {
+				protocolVersion = p.ProtocolVersion
+			}
+		}
 		return map[string]interface{}{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": protocolVersion,
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
 			},
 			"serverInfo": map[string]string{
 				"name":    "processguard-mcp",
-				"version": "2.0.0",
+				"version": Version,
 			},
 		}, nil
 
@@ -153,8 +174,6 @@ func dispatch(cfg *config.Config, req Request) (interface{}, *RPCError) {
 		return nil, &RPCError{Code: -32601, Message: "Method not found: " + req.Method}
 	}
 }
-
-// need encoder to work with JSONRPC 2.0
 
 func writeError(enc *json.Encoder, id interface{}, code int, msg string) {
 	enc.Encode(Response{

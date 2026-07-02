@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -14,72 +15,105 @@ import (
 
 // VTReport holds the VirusTotal analysis result for a single file hash.
 type VTReport struct {
-	Hash        string `json:"hash"`
-	Malicious   int    `json:"malicious"`
-	Suspicious  int    `json:"suspicious"`
-	Undetected  int    `json:"undetected"`
-	TotalEngines int   `json:"total_engines"`
-	Score       string `json:"score"`      // "5/72" human-readable
-	Permalink   string `json:"permalink"`
-	Error       string `json:"error,omitempty"`
+	Hash         string `json:"hash"`
+	Malicious    int    `json:"malicious"`
+	Suspicious   int    `json:"suspicious"`
+	Undetected   int    `json:"undetected"`
+	Harmless     int    `json:"harmless"`
+	TotalEngines int    `json:"total_engines"`
+	Score        string `json:"score"` // "5/72" human-readable
+	Permalink    string `json:"permalink"`
+	Error        string `json:"error,omitempty"`
 }
 
-// vtCache is an in-memory cache keyed by SHA256 hash.
-// Entries expire after 24 hours to stay within VT free-tier limits.
+// vtCacheEntry is an in-memory cache record keyed by SHA256 hash.
 type vtCacheEntry struct {
-	report    VTReport
-	cachedAt  time.Time
+	report   VTReport
+	cachedAt time.Time
+}
+
+// vtCall coalesces concurrent lookups of the same hash so that N simultaneous
+// callers make ONE upstream request and share the result (a manual
+// singleflight, keeping this dependency-free).
+type vtCall struct {
+	wg     sync.WaitGroup
+	report VTReport
+	err    error
 }
 
 var (
-	vtCacheMu sync.Mutex
-	vtCache   = map[string]vtCacheEntry{}
+	vtCacheMu  sync.Mutex
+	vtCache    = map[string]vtCacheEntry{}
+	vtInflight = map[string]*vtCall{}
 )
 
 const vtCacheTTL = 24 * time.Hour
 
-// rateLimiter provides a simple token bucket at 4 requests per 60 seconds
-// to stay within the VirusTotal free tier (4 req/min).
+// vtHashRe validates a SHA256 as exactly 64 lowercase hex characters before it
+// is ever interpolated into the request URL.
+var vtHashRe = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// rateLimiter provides a token bucket at 4 requests per 60 seconds to stay
+// within the VirusTotal free tier (4 req/min).
 var vtRateLimiter = newTokenBucket(4, 60*time.Second)
 
-// LookupHash queries VirusTotal for a SHA256 hash.
-// Returns a cached result if available and fresh.
-// NEVER exposes the API key in the returned data.
+// LookupHash queries VirusTotal for a SHA256 hash. Returns a fresh cached result
+// when available, coalesces concurrent identical lookups, and NEVER exposes the
+// API key in the returned data.
 func LookupHash(cfg *config.Config, sha256 string) (string, error) {
 	if cfg.VTAPIKey == "" {
 		return "", fmt.Errorf("vt_api_key not configured — add your free VirusTotal API key to config.json")
 	}
 	sha256 = strings.ToLower(strings.TrimSpace(sha256))
-	if len(sha256) != 64 {
-		return "", fmt.Errorf("invalid SHA256 hash (expected 64 hex chars, got %d)", len(sha256))
+	if !vtHashRe.MatchString(sha256) {
+		return "", fmt.Errorf("invalid SHA256 hash — expected 64 hex characters")
 	}
 
-	// Check cache
 	vtCacheMu.Lock()
+	// Fresh cache hit.
 	if entry, ok := vtCache[sha256]; ok && time.Since(entry.cachedAt) < vtCacheTTL {
 		vtCacheMu.Unlock()
-		result, err := json.MarshalIndent(entry.report, "", "  ")
-		return string(result), err
+		return marshalReport(entry.report)
 	}
-	vtCacheMu.Unlock()
-
-	// Rate limit
+	// A lookup for this hash is already in flight — join it.
+	if call, ok := vtInflight[sha256]; ok {
+		vtCacheMu.Unlock()
+		call.wg.Wait()
+		if call.err != nil {
+			return "", call.err
+		}
+		return marshalReport(call.report)
+	}
+	// We are the leader: consume a rate-limit token and register the in-flight call.
 	if !vtRateLimiter.Allow() {
+		vtCacheMu.Unlock()
 		return "", fmt.Errorf("VirusTotal rate limit reached (4 req/min on free tier) — retry in a moment")
 	}
+	call := &vtCall{}
+	call.wg.Add(1)
+	vtInflight[sha256] = call
+	vtCacheMu.Unlock()
 
 	report, err := fetchVTReport(cfg.VTAPIKey, sha256)
+
+	vtCacheMu.Lock()
+	if err == nil {
+		vtCache[sha256] = vtCacheEntry{report: report, cachedAt: time.Now()}
+	}
+	call.report, call.err = report, err
+	delete(vtInflight, sha256)
+	vtCacheMu.Unlock()
+	call.wg.Done()
+
 	if err != nil {
 		return "", err
 	}
+	return marshalReport(report)
+}
 
-	// Store in cache
-	vtCacheMu.Lock()
-	vtCache[sha256] = vtCacheEntry{report: report, cachedAt: time.Now()}
-	vtCacheMu.Unlock()
-
-	result, err := json.MarshalIndent(report, "", "  ")
-	return string(result), err
+func marshalReport(r VTReport) (string, error) {
+	out, err := json.MarshalIndent(r, "", "  ")
+	return string(out), err
 }
 
 // fetchVTReport makes the actual VirusTotal API v3 call.
@@ -114,14 +148,21 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 		return report, fmt.Errorf("VT API returned HTTP %d", resp.StatusCode)
 	}
 
-	// Parse the VT API v3 response structure
+	// Parse the VT API v3 response structure. The denominator MUST include every
+	// analysis bucket — omitting harmless/timeout/type-unsupported understated the
+	// engine total (e.g. "0/12" for a clean file that scanned 72 engines).
 	var vtResp struct {
 		Data struct {
 			Attributes struct {
 				LastAnalysisStats struct {
-					Malicious  int `json:"malicious"`
-					Suspicious int `json:"suspicious"`
-					Undetected int `json:"undetected"`
+					Malicious        int `json:"malicious"`
+					Suspicious       int `json:"suspicious"`
+					Undetected       int `json:"undetected"`
+					Harmless         int `json:"harmless"`
+					Timeout          int `json:"timeout"`
+					ConfirmedTimeout int `json:"confirmed-timeout"`
+					Failure          int `json:"failure"`
+					TypeUnsupported  int `json:"type-unsupported"`
 				} `json:"last_analysis_stats"`
 			} `json:"attributes"`
 			Links struct {
@@ -137,7 +178,9 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 	report.Malicious = stats.Malicious
 	report.Suspicious = stats.Suspicious
 	report.Undetected = stats.Undetected
-	report.TotalEngines = stats.Malicious + stats.Suspicious + stats.Undetected
+	report.Harmless = stats.Harmless
+	report.TotalEngines = stats.Malicious + stats.Suspicious + stats.Undetected +
+		stats.Harmless + stats.Timeout + stats.ConfirmedTimeout + stats.Failure + stats.TypeUnsupported
 	report.Score = fmt.Sprintf("%d/%d", stats.Malicious, report.TotalEngines)
 	report.Permalink = vtResp.Data.Links.Self
 
@@ -147,10 +190,10 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 // ── Token bucket rate limiter ─────────────────────────────────────────────
 
 type tokenBucket struct {
-	mu       sync.Mutex
-	tokens   int
-	capacity int
-	lastFill time.Time
+	mu        sync.Mutex
+	tokens    int
+	capacity  int
+	lastFill  time.Time
 	fillEvery time.Duration
 }
 
