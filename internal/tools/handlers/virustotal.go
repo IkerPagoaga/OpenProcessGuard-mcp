@@ -94,7 +94,19 @@ func LookupHash(cfg *config.Config, sha256 string) (string, error) {
 	vtInflight[sha256] = call
 	vtCacheMu.Unlock()
 
-	report, err := fetchVTReport(cfg.VTAPIKey, sha256)
+	// The fetch runs inside a recover so a panic cannot leave the in-flight slot
+	// registered and the WaitGroup un-Done — which would block every follower
+	// forever and permanently poison this hash until restart.
+	var report VTReport
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("VirusTotal lookup panicked: %v", r)
+			}
+		}()
+		report, err = fetchVTReport(cfg.VTAPIKey, sha256)
+	}()
 
 	vtCacheMu.Lock()
 	if err == nil {

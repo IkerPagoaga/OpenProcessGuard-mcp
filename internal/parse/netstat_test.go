@@ -17,11 +17,11 @@ Active Connections
 		t.Fatalf("expected 4 connections (header/blank rows dropped), got %d: %+v", len(conns), conns)
 	}
 
-	// UDP row must be parsed — it has only 4 fields (no state column). This was
-	// previously dropped by a `< 5` guard, making UDP handling dead code.
+	// UDP row must be parsed — it has only 4 fields (no state column). It is
+	// stateless (empty status) and its foreign address is the literal "*:*".
 	udp := conns[3]
-	if udp.Protocol != "UDP" || udp.Status != "LISTENING" || !udp.HasPID || udp.PID != 5000 {
-		t.Errorf("UDP row parsed wrong: %+v", udp)
+	if udp.Protocol != "UDP" || udp.Status != "" || udp.RemoteAddr != "*:*" || !udp.HasPID || udp.PID != 5000 {
+		t.Errorf("UDP row parsed wrong (want stateless, foreign=*:*, pid=5000): %+v", udp)
 	}
 
 	est := conns[1]

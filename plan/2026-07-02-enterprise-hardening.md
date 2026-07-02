@@ -44,8 +44,9 @@ well-architected tool that is not yet enterprise-ready. This roadmap closes that
 1. **Architecture** — extract pure parsers into `internal/parse`; central `internal/run` tool-runner
    with context timeouts; structured `slog`; coalesce the VirusTotal cache.
 2. **Correctness** — land every fix above on the new structure.
-3. **Security** — restrict `config.json` ACLs to the current user; disclosure key in SECURITY.md;
-   MCP protocol-version negotiation.
+3. **Security** — MCP protocol-version negotiation; SHA256 hex validation before the VirusTotal
+   request; disclosure note in SECURITY.md. (config.json is user-created under user-scoped
+   `%LOCALAPPDATA%`, so no extra ACL step is applied; the audit log is written `0600`.)
 4. **Testing** — table-driven unit tests over the extracted parsers + the sanitiser/config/cache;
    coverage gate in CI.
 5. **Supply chain** — CI (build, vet, gofmt gate, `go test -race` + coverage, `govulncheck`,
@@ -54,15 +55,31 @@ well-architected tool that is not yet enterprise-ready. This roadmap closes that
 6. **Install** — zero-config first run; Sysinternals auto-discovery; `install.ps1`; README rewrite
    around a signed-release download with a copy-paste Claude Desktop config block.
 7. **Docs** — `CONTRIBUTING.md`, `ARCHITECTURE.md`, `LIMITATIONS.md`, README polish.
-8. **Release** — history hygiene; tag `v2.1.0`; first signed GitHub Release.
+8. **Release** — purge the committed binaries + old `config.json` from git history, then cut the
+   first signed release. This step rewrites public history and force-pushes; it is destructive and
+   runs only under explicit approval. No secret was ever committed (`vt_api_key` is empty in every
+   historical blob), so this is history *hygiene*, not secret remediation — no key rotation needed.
+
+   Safe procedure (order matters — the hardening commits currently exist only locally):
+   1. **Back up first.** Push the current hardening commits to both remotes so nothing is lost if the
+      rewrite goes wrong: `git push origin main` and `git push public main`.
+   2. **Fresh mirror clone** (filter-repo refuses to rewrite a working repo): `git clone --mirror <url> pg-mirror`.
+   3. **Purge** in the mirror: `git filter-repo --path-glob '*.exe' --path-glob '*.exe~' --path config.json --invert-paths`.
+   4. **Verify clean:** `git -C pg-mirror rev-list --objects --all | grep -iE '\.exe|config\.json'` returns nothing.
+   5. **Force-push the rewritten history to BOTH remotes** (`origin` = `processGuard-mcp`, `public` =
+      `OpenProcessGuard-mcp`) so they don't diverge. This also publishes the already-local #3/#4/#6/#7 fixes.
+   6. **Tag `v2.1.0`** on the rewritten tip and push the tag — this fires `release.yml` (goreleaser +
+      cosign keyless + SBOM). Publish the drafted GitHub Release after verifying the artifact.
 9. **Verify** — full build/test/vuln pass + end-to-end MCP checks + release-artifact verification.
 
 ## Verifying a release (target UX)
 
-```
+```bash
 sha256sum -c processguard-mcp_2.1.0_SHA256SUMS
-cosign verify-blob --certificate-identity-regexp '.*' \
+cosign verify-blob \
+  --certificate-identity-regexp 'https://github.com/IkerPagoaga/OpenProcessGuard-mcp/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --signature processguard-mcp_2.1.0_SHA256SUMS.sig \
+  --certificate processguard-mcp_2.1.0_SHA256SUMS.pem \
   processguard-mcp_2.1.0_SHA256SUMS
 ```

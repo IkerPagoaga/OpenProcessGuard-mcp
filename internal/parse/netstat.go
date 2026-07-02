@@ -35,18 +35,18 @@ func Netstat(raw string) []NetConn {
 			continue
 		}
 		proto := strings.ToUpper(fields[0])
+		if proto != "TCP" && proto != "UDP" {
+			continue // header, "Active Connections", or a non-IP row
+		}
 
 		c := NetConn{Protocol: proto, LocalAddr: fields[1]}
-		switch {
-		case proto == "TCP" && len(fields) >= 5:
-			c.RemoteAddr = fields[2]
+		if len(fields) >= 3 {
+			c.RemoteAddr = fields[2] // "*:*" for UDP / listeners; a real addr for TCP
+		}
+		// Only TCP carries a connection-state column (fields[3]); UDP is stateless,
+		// so we do not fabricate a status for it.
+		if proto == "TCP" && len(fields) >= 5 {
 			c.Status = fields[3]
-		case proto == "UDP":
-			c.RemoteAddr = "*"
-			c.Status = "LISTENING"
-		default:
-			// Not a TCP/UDP data row (header, blank, or malformed TCP row).
-			continue
 		}
 
 		if pid, err := strconv.ParseInt(fields[len(fields)-1], 10, 32); err == nil {

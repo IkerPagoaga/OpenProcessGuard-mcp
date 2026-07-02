@@ -45,6 +45,11 @@ func Load() (*Config, error) {
 	if v := os.Getenv("PROCEXP_PATH"); v != "" {
 		cfg.ProcessExplorerPath = v
 		applyDefaults(&cfg)
+		// Validate on this path too, so the whitelist can never be bypassed by
+		// setting config via the env-var branch.
+		if err := cfg.validate(); err != nil {
+			return nil, fmt.Errorf("config validation failed: %w", err)
+		}
 		return &cfg, nil
 	}
 

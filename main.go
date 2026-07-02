@@ -55,8 +55,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := procex.VerifyPath(cfg.ProcessExplorerPath); err != nil {
-		slog.Warn("ProcessExplorer not configured — signing derived via Get-AuthenticodeSignature", "path", cfg.ProcessExplorerPath)
+	// Process Explorer is optional and no longer used for signing (that now comes
+	// from Get-AuthenticodeSignature) — only warn if a path was explicitly set but
+	// is missing, instead of on every default headless startup.
+	if cfg.ProcessExplorerPath != "" {
+		if err := procex.VerifyPath(cfg.ProcessExplorerPath); err != nil {
+			slog.Warn("configured procexp_path not found (Process Explorer is optional)", "path", cfg.ProcessExplorerPath)
+		}
 	}
 
 	if cfg.AuditLog {
