@@ -38,7 +38,7 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 ## [2.0.0] - 2026-04-01
 
 ### Added
-- 21 tools across 5 hunting stages (native, Process Explorer, Autoruns, Sysmon, VirusTotal, GeoIP).
+- 17 tools across 5 hunting stages (native, Process Explorer, Autoruns, Sysmon, VirusTotal, GeoIP).
 - Prompt-injection output sanitisation, PID/since-minutes bounds, `sysmon_log` whitelist,
   append-only audit log, threat model (SECURITY.md), MIT + Sysinternals-carve-out LICENSE.
 

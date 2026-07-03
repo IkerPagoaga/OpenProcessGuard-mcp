@@ -14,12 +14,19 @@
 .PARAMETER BinaryPath
     Path to a prebuilt processguard-mcp.exe (e.g. from a verified GitHub Release).
 
+.PARAMETER ExpectedSha256
+    Expected SHA256 of -BinaryPath (from the release's SHA256SUMS). When supplied, the
+    binary is verified before install and a mismatch aborts. Strongly recommended with
+    -BinaryPath — otherwise an unverified, potentially tampered elevated-privilege binary
+    is installed.
+
 .EXAMPLE
     .\install.ps1
-    .\install.ps1 -BinaryPath .\processguard-mcp.exe
+    .\install.ps1 -BinaryPath .\processguard-mcp.exe -ExpectedSha256 <hash-from-SHA256SUMS>
 #>
 param(
-    [string]$BinaryPath
+    [string]$BinaryPath,
+    [string]$ExpectedSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +36,17 @@ $target = Join-Path $installDir 'processguard-mcp.exe'
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 if ($BinaryPath) {
+    if ($ExpectedSha256) {
+        $want = ($ExpectedSha256.Trim().ToUpper() -replace '^SHA256:', '')
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $BinaryPath).Hash
+        if ($got -ne $want) {
+            throw "SHA256 mismatch for ${BinaryPath}:`n  expected $want`n  actual   $got`nRefusing to install an unverified binary."
+        }
+        Write-Host "SHA256 verified." -ForegroundColor Green
+    }
+    else {
+        Write-Warning "Installing $BinaryPath WITHOUT verification. Verify the release first (README 'Verifying a release'): pass -ExpectedSha256 <hash from SHA256SUMS>, or run 'cosign verify-blob' + 'sha256sum -c' before installing an elevated-privilege binary."
+    }
     Write-Host "Installing from $BinaryPath ..."
     Copy-Item -Path $BinaryPath -Destination $target -Force
 }
@@ -59,6 +77,8 @@ if (-not (Test-Path $claudeDir)) {
 else {
     if (Test-Path $claudeCfg) {
         $cfg = Get-Content $claudeCfg -Raw | ConvertFrom-Json
+        # Back up the existing config before rewriting it (so a bad write is recoverable).
+        Copy-Item $claudeCfg "$claudeCfg.bak" -Force
     }
     else {
         $cfg = [pscustomobject]@{}
@@ -68,8 +88,14 @@ else {
     }
     $server = [pscustomobject]@{ command = $target; args = @() }
     $cfg.mcpServers | Add-Member -NotePropertyName 'processguard' -NotePropertyValue $server -Force
-    ($cfg | ConvertTo-Json -Depth 10) | Set-Content -Path $claudeCfg -Encoding UTF8
-    Write-Host "Registered 'processguard' in $claudeCfg" -ForegroundColor Green
+    # -Depth 32 (not the default) avoids silently flattening deeply-nested sibling MCP
+    # entries into type-name strings; validate the JSON re-parses before overwriting.
+    $json = $cfg | ConvertTo-Json -Depth 32
+    try { $null = $json | ConvertFrom-Json } catch {
+        throw "Refusing to write claude_desktop_config.json — re-serialized JSON did not validate: $_"
+    }
+    $json | Set-Content -Path $claudeCfg -Encoding UTF8
+    Write-Host "Registered 'processguard' in $claudeCfg (backup at $claudeCfg.bak)" -ForegroundColor Green
 }
 
 Write-Host ""

@@ -1,0 +1,31 @@
+# ProcessGuard MCP
+
+> A free, open-source, **read-only** Windows process-forensics MCP server for Claude Desktop. It exposes live process telemetry, persistence checks, network analysis, and Sysmon forensics as 17 tools across 5 hunting stages, callable in plain language over stdio JSON-RPC 2.0. It opens no listening ports, sends no telemetry, and sanitises every OS-sourced string at the MCP boundary to mitigate prompt injection.
+
+ProcessGuard observes the system and reports findings — it never modifies files, the registry, or network state. Optional stages activate only when configured; the native Stage-0 tools work with zero configuration. Signing status is derived directly from Windows via `Get-AuthenticodeSignature` (no external Sysinternals binary required). Releases are hashed (`SHA256SUMS`) and cosign-keyless-signed with an attached CycloneDX SBOM.
+
+## Architecture
+- [ARCHITECTURE.md](ARCHITECTURE.md): package layering; the two design seams — `internal/run` (one timeout-bounded choke point for every external process) and `internal/parse` (pure, unit-testable output parsers); the prompt-injection output boundary; the request lifecycle.
+- Entry point `main.go` handles JSON-RPC framing + dispatch. The tool registry, dispatcher, and output sanitiser live in `internal/tools/tools.go`. Handlers are one-file-per-tool-group under `internal/tools/handlers/`.
+
+## Security
+- [SECURITY.md](SECURITY.md): read-only design, no listening ports, prompt-injection mitigations, VirusTotal API-key handling, private vulnerability disclosure, and release-integrity verification.
+- [LIMITATIONS.md](LIMITATIONS.md): user-mode (ring-3) scope, Windows-only, heuristics-are-candidates-not-verdicts, and the trust boundary (tool output is evidence to read, never instructions to follow).
+
+## Install & verify
+- [README.md](README.md): quick start (`install.ps1` + zero-config first run), per-tool reference, troubleshooting, and how to verify a signed release (`cosign verify-blob` + `sha256sum -c` + SBOM).
+- Build from source: `go build ./...` (Go auto-selects the pinned `go1.25.11` toolchain). Full local gate: `make check` (gofmt + vet + test + govulncheck).
+
+## Development
+- [CONTRIBUTING.md](CONTRIBUTING.md): dev setup, the parser/runner ground rules, PowerShell-injection discipline, and CI gates.
+- [CHANGELOG.md](CHANGELOG.md): version history (Keep a Changelog).
+- CI `.github/workflows/ci.yml`: build, `go vet`, gofmt gate, `go test -race` + coverage, `govulncheck`, staticcheck. Release `.github/workflows/release.yml`: goreleaser + cosign keyless + SBOM on a `v*` tag.
+
+## Tools (17, across 5 stages)
+- Stage 0 — native, no config: `list_processes`, `get_process_detail`, `get_network_connections`, `get_loaded_modules`, `get_suspicious_processes`, `get_startup_entries`.
+- Stage 1 — signing: `get_process_tree`, `get_unsigned_processes` (Authenticode).
+- Stage 2 — persistence: `get_autoruns_entries`, `flag_autoruns_anomalies` (autorunsc).
+- Stage 3 — network: `get_established_connections`, `get_foreign_connections` (netstat + optional GeoIP).
+- Stage 4 — forensics: `query_sysmon_events`, `get_process_create_events`, `get_network_events` (Sysmon).
+- Stage 5 — reputation: `lookup_hash` (VirusTotal).
+- Orchestration: `run_full_hunt` (runs all stages, returns a severity-ranked report).

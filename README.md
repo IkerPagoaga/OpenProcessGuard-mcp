@@ -2,7 +2,7 @@
 
 > A free, open-source Windows security monitoring server for Claude Desktop.
 
-ProcessGuard exposes live process telemetry, persistence checks, network analysis, and Sysmon forensics through 21 tools organised across 5 hunting stages — all callable by Claude in plain language.
+ProcessGuard exposes live process telemetry, persistence checks, network analysis, and Sysmon forensics through 17 tools organised across 5 hunting stages — all callable by Claude in plain language.
 
 **Built on the belief that security tooling should be open, auditable, and free.**
 
@@ -505,7 +505,7 @@ ProcessGuard opens **zero listening ports**. It communicates exclusively over `s
 
 ProcessGuard collects raw OS data and passes it into Claude's context window. An adversary with local code execution could craft process names or registry keys that look like LLM instructions. The following mitigations are implemented:
 
-- **String truncation** — every string field is capped at 512 characters before leaving the MCP boundary.
+- **String truncation** — string fields are capped before leaving the MCP boundary: 512 characters by default, and 16384 for forensic-evidence fields (command lines, hashes, Sysmon XML) so they aren't cut off (those fields carry a larger injection surface by design).
 - **Control character stripping** — ASCII control characters (< 0x20, DEL) are stripped from all output.
 - **Config validation** — `sysmon_log` is validated against a strict character allowlist at startup to prevent PowerShell injection.
 - **Env var redaction** — `get_process_detail` redacts values for env vars matching: `token`, `secret`, `password`, `key`, `apikey`, `credential`, `auth`, `private`, `cert`, `jwt`, `bearer`.

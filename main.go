@@ -164,7 +164,18 @@ func dispatch(cfg *config.Config, req Request) (interface{}, *RPCError) {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, &RPCError{Code: -32602, Message: "Invalid params"}
 		}
-		content, err := tools.Call(cfg, p.Name, p.Arguments)
+		// Recover from any handler panic so a single tool crash returns a clean
+		// JSON-RPC error instead of killing the (often elevated) server connection.
+		var content string
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("tool %q panicked: %v", p.Name, r)
+				}
+			}()
+			content, err = tools.Call(cfg, p.Name, p.Arguments)
+		}()
 		if err != nil {
 			return nil, &RPCError{Code: -32603, Message: fmt.Sprintf("Tool error: %v", err)}
 		}

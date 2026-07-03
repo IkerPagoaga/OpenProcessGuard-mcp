@@ -43,6 +43,9 @@ Desktop.ini
 *.swo
 *~
 
+# ── Runtime cache ────────────────────────────────────────────
+.mcp_cache/
+
 # ── Go toolchain ─────────────────────────────────────────────
 # (go.sum IS committed — it locks transitive dependencies)
 vendor/

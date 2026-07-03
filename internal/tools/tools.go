@@ -314,6 +314,9 @@ func callInner(cfg *config.Config, name string, args json.RawMessage) (string, e
 		if err := json.Unmarshal(args, &p); err != nil {
 			return "", fmt.Errorf("invalid args: %w", err)
 		}
+		if p.EventID < 1 || p.EventID > 255 {
+			return "", fmt.Errorf("event_id must be between 1 and 255")
+		}
 		if p.SinceMinutes == 0 {
 			p.SinceMinutes = 60
 		}

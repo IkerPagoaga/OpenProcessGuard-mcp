@@ -57,7 +57,7 @@ The following mitigations are implemented:
 
 | Layer | Mitigation |
 |---|---|
-| **String truncation** | Every string field returned to Claude is capped at 512 characters. |
+| **String truncation** | String fields are capped before returning to Claude: **512 characters by default**, and **16384 for forensic-evidence fields** (command lines, hashes, Sysmon XML) that would otherwise be cut off. Those larger fields carry a correspondingly larger prompt-injection surface by design — treat their contents as evidence, never instructions. |
 | **Control character stripping** | ASCII control characters (< 0x20, DEL) are removed from all output, except tab and newline. |
 | **Non-printable Unicode removal** | Non-printable Unicode code points are replaced with `?`. |
 | **Output sanitisation at boundary** | All tool output passes through `sanitiseJSON()` in `tools.go` before it reaches Claude — individual handlers do not need to sanitise. |
@@ -71,7 +71,7 @@ The following mitigations are implemented:
 ## API Key Handling
 
 - The VirusTotal API key (`vt_api_key`) is stored in `config.json` on disk.
-- It is sent only as an HTTPS header to `api.virustotal.com` — never logged, never included in tool responses.
+- It is sent only as an HTTPS header to `www.virustotal.com` — never logged, never included in tool responses.
 - `config.json` is excluded from the repository via `.gitignore` and must never be committed.
 - File permissions on `config.json` should be restricted: on Windows, ensure only your user account has read access (right-click → Properties → Security).
 
@@ -84,7 +84,7 @@ ProcessGuard does **not** open any listening ports. The attack surface is:
 | Interface | Direction | Description |
 |---|---|---|
 | `stdin` / `stdout` | Inbound from Claude Desktop | MCP JSON-RPC 2.0 protocol — local process pipe only |
-| HTTPS to `api.virustotal.com` | Outbound | Only when vt_api_key is configured and lookup_hash is called |
+| HTTPS to `www.virustotal.com` | Outbound | Only when vt_api_key is configured and lookup_hash is called |
 | HTTPS to MaxMind (none) | None | GeoIP database is a local file — no network calls |
 
 ---
