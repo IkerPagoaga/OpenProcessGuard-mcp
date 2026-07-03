@@ -6,6 +6,22 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-07-03
+
+### Security
+- `install.ps1` restricts `config.json` (which may hold the VirusTotal API key) to
+  Administrators + SYSTEM via `icacls`, and prints the command to run after creating
+  it — files under `%ProgramFiles%` are world-readable by default, so this keeps the
+  key out of reach of non-admin accounts.
+- Removed the legacy `PROCEXP_PATH` environment variable: config is now read only from
+  `config.json` in the admin-only install directory, so no user-scoped env var can
+  steer the elevated server.
+
+### Fixed
+- VirusTotal rate-limit token is refunded when a lookup never reaches the upstream
+  (transport failure / panic), so a VirusTotal outage no longer drains the per-minute
+  budget. An HTTP error response still counts (it consumed real VT quota).
+
 ## [2.1.1] - 2026-07-03
 
 ### Fixed

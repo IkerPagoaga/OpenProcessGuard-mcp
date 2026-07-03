@@ -78,6 +78,17 @@ else {
 }
 Write-Host "Installed to $target" -ForegroundColor Green
 
+# Harden config.json if it already exists (upgrade / re-install): it may hold the
+# VirusTotal API key, and files under Program Files are world-READABLE by default.
+# Restrict it to Administrators + SYSTEM so a non-admin can neither read the key nor
+# plant a config the elevated server would load. The binary itself stays
+# Users-readable so the non-elevated Stage-0 mode keeps working.
+$installConfig = Join-Path $installDir 'config.json'
+if (Test-Path $installConfig) {
+    icacls $installConfig /inheritance:r /grant:r "Administrators:F" "SYSTEM:F" | Out-Null
+    Write-Host "Restricted existing config.json to Administrators + SYSTEM." -ForegroundColor Green
+}
+
 # ── Register with Claude Desktop ────────────────────────────────────────────
 $claudeCfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
 $claudeDir = Split-Path -Parent $claudeCfg
@@ -112,5 +123,6 @@ else {
 Write-Host ""
 Write-Host "Done. Restart Claude Desktop, then ask it to run 'list_processes'." -ForegroundColor Cyan
 Write-Host "Native tools work now. To enable optional stages (Autoruns / Sysmon / VirusTotal / GeoIP),"
-Write-Host "copy config.example.json to '$installDir\config.json' (an admin-only write, which also keeps"
-Write-Host "the VT API key and tool paths out of reach of non-admin tampering) and fill in the paths/keys."
+Write-Host "copy config.example.json to '$installDir\config.json' (an admin-only write) and fill in the"
+Write-Host "paths/keys, then lock the file so the VT API key is not world-readable under Program Files:"
+Write-Host "  icacls `"$installDir\config.json`" /inheritance:r /grant:r Administrators:F SYSTEM:F" -ForegroundColor Yellow

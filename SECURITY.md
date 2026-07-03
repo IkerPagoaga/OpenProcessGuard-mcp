@@ -75,7 +75,7 @@ The following mitigations are implemented:
 - `config.json` is excluded from the repository via `.gitignore` and must never be committed.
 - File permissions on `config.json` should be restricted: on Windows, ensure only your user account has read access (right-click → Properties → Security).
 - ProcessGuard reads `config.json` from its own install directory. When installed via `install.ps1` that is `%ProgramFiles%\ProcessGuard` (admin-only writable), so a non-admin cannot plant a malicious `config.json` that would point the elevated server at attacker-chosen tool paths. Do **not** relocate the binary to a user-writable directory or loosen that folder's ACL — either re-opens a config-plant vector. Editing the config therefore requires elevation, by design.
-- The legacy `PROCEXP_PATH` environment variable is still honoured for backward compatibility but is inert: Process Explorer is no longer used for signing (that now comes from `Get-AuthenticodeSignature`), so the value cannot influence detection.
+- The legacy `PROCEXP_PATH` environment variable has been removed: config is read only from `config.json` in the (admin-only) install directory, so no user-scoped environment variable can steer the elevated server. Process Explorer is no longer used at all — Stage-1 signing comes from `Get-AuthenticodeSignature`.
 
 ---
 

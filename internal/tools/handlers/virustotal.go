@@ -98,6 +98,7 @@ func LookupHash(cfg *config.Config, sha256 string) (string, error) {
 	// registered and the WaitGroup un-Done — which would block every follower
 	// forever and permanently poison this hash until restart.
 	var report VTReport
+	var reached bool
 	var err error
 	func() {
 		defer func() {
@@ -105,7 +106,7 @@ func LookupHash(cfg *config.Config, sha256 string) (string, error) {
 				err = fmt.Errorf("VirusTotal lookup panicked: %v", r)
 			}
 		}()
-		report, err = fetchVTReport(cfg.VTAPIKey, sha256)
+		report, reached, err = fetchVTReport(cfg.VTAPIKey, sha256)
 	}()
 
 	vtCacheMu.Lock()
@@ -116,6 +117,13 @@ func LookupHash(cfg *config.Config, sha256 string) (string, error) {
 	delete(vtInflight, sha256)
 	vtCacheMu.Unlock()
 	call.wg.Done()
+
+	// A request that never reached VirusTotal (transport failure or panic) consumed
+	// no upstream quota — return the token so a VT outage doesn't drain the budget.
+	// An HTTP error response DID reach VT and is left counted.
+	if err != nil && !reached {
+		vtRateLimiter.Refund()
+	}
 
 	if err != nil {
 		return "", err
@@ -128,14 +136,18 @@ func marshalReport(r VTReport) (string, error) {
 	return string(out), err
 }
 
-// fetchVTReport makes the actual VirusTotal API v3 call.
-func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
+// fetchVTReport makes the actual VirusTotal API v3 call. The bool return reports
+// whether the request actually REACHED VirusTotal (i.e. produced an HTTP response):
+// a transport failure that never reached the upstream should not consume the
+// caller's per-minute rate budget, whereas an HTTP error response DID consume real
+// VT quota and must count.
+func fetchVTReport(apiKey, sha256 string) (VTReport, bool, error) {
 	report := VTReport{Hash: sha256}
 
 	url := "https://www.virustotal.com/api/v3/files/" + sha256
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return report, fmt.Errorf("VT request build failed: %w", err)
+		return report, false, fmt.Errorf("VT request build failed: %w", err)
 	}
 	req.Header.Set("x-apikey", apiKey)
 	req.Header.Set("Accept", "application/json")
@@ -143,21 +155,22 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return report, fmt.Errorf("VT request failed: %w", err)
+		return report, false, fmt.Errorf("VT request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// From here on we have an HTTP response — the request reached VirusTotal.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return report, fmt.Errorf("VT response read failed: %w", err)
+		return report, true, fmt.Errorf("VT response read failed: %w", err)
 	}
 
 	if resp.StatusCode == 404 {
 		report.Score = "not found"
-		return report, nil
+		return report, true, nil
 	}
 	if resp.StatusCode != 200 {
-		return report, fmt.Errorf("VT API returned HTTP %d", resp.StatusCode)
+		return report, true, fmt.Errorf("VT API returned HTTP %d", resp.StatusCode)
 	}
 
 	// Parse the VT API v3 response structure. The denominator MUST include every
@@ -180,7 +193,7 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &vtResp); err != nil {
-		return report, fmt.Errorf("VT response parse failed: %w", err)
+		return report, true, fmt.Errorf("VT response parse failed: %w", err)
 	}
 
 	stats := vtResp.Data.Attributes.LastAnalysisStats
@@ -195,7 +208,7 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 	// not viewable in a browser).
 	report.Permalink = "https://www.virustotal.com/gui/file/" + sha256
 
-	return report, nil
+	return report, true, nil
 }
 
 // ── Token bucket rate limiter ─────────────────────────────────────────────
@@ -241,4 +254,15 @@ func (tb *tokenBucket) Allow() bool {
 	}
 	tb.tokens--
 	return true
+}
+
+// Refund returns a previously-consumed token (never exceeding capacity). Used when
+// a request never reached the upstream, so a transient VirusTotal outage does not
+// permanently reduce the minute's budget.
+func (tb *tokenBucket) Refund() {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.tokens < tb.capacity {
+		tb.tokens++
+	}
 }
