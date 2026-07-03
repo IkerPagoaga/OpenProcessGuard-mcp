@@ -169,7 +169,7 @@ This gets all 6 Stage 0 tools working immediately — no additional software nee
 
 ```json
 {
-  "procexp_path":  "C:\\Tools\\SysinternalsSuite\\procexp64.exe",
+  "procexp_path":  "",
   "autoruns_path": "C:\\Tools\\SysinternalsSuite\\autorunsc.exe",
   "tcpview_path":  "",
   "sysmon_log":    "Microsoft-Windows-Sysmon/Operational",
@@ -183,7 +183,7 @@ This gets all 6 Stage 0 tools working immediately — no additional software nee
 
 | Field | Required | Default | Description |
 |---|---|---|---|
-| `procexp_path` | No | `""` | Full path to `procexp64.exe`. Enables Stage 1 tools. Falls back to PowerShell if empty. |
+| `procexp_path` | No | `""` | Reserved — not used. Stage 1 signing comes from the built-in `Get-AuthenticodeSignature`; no Process Explorer download is needed. |
 | `autoruns_path` | No | `""` | Full path to `autorunsc.exe`. Enables Stage 2 persistence scanning. |
 | `tcpview_path` | No | `""` | Reserved — not yet active. |
 | `sysmon_log` | No | `"Microsoft-Windows-Sysmon/Operational"` | Windows Event Log channel for Sysmon. Only alphanumeric characters, spaces, hyphens, slashes, underscores, and dots are allowed. |
@@ -191,7 +191,7 @@ This gets all 6 Stage 0 tools working immediately — no additional software nee
 | `geoip_db` | No | `""` | Path to MaxMind `GeoLite2-City.mmdb`. Enables country/city data on foreign connections. |
 | `audit_log` | No | `true` | Writes a JSONL audit log to `%APPDATA%\ProcessGuard\audit.log`. |
 
-> **Important:** All paths in `config.json` must use **double backslashes** (`\\`). For example: `C:\\Tools\\procexp64.exe`.
+> **Important:** All paths in `config.json` must use **double backslashes** (`\\`). For example: `C:\\Tools\\SysinternalsSuite\\autorunsc.exe`.
 
 > **Security:** `config.json` is listed in `.gitignore` and must never be committed to version control — it may contain your VirusTotal API key and local paths.
 
@@ -268,19 +268,11 @@ Each optional tool unlocks additional hunting stages. Install them in any order.
 
 ---
 
-### Sysinternals Process Explorer (Stage 1)
+### Stage 1 — Signing (no download required)
 
 Enables: `get_process_tree`, `get_unsigned_processes`
 
-1. Download from: https://learn.microsoft.com/en-us/sysinternals/downloads/process-explorer
-2. Extract to a permanent folder (e.g. `C:\Tools\SysinternalsSuite\`).
-3. Set in `config.json`:
-
-```json
-"procexp_path": "C:\\Tools\\SysinternalsSuite\\procexp64.exe"
-```
-
-4. Restart Claude Desktop.
+Stage 1 derives Authenticode signing status from the built-in Windows `Get-AuthenticodeSignature` — **no Sysinternals download is needed.** (`procexp_path` is reserved and currently unused: Process Explorer has no headless CSV-export mode, so it was replaced by the native signing path.)
 
 ---
 
@@ -416,11 +408,11 @@ You should see `Status: Running`.
 | `get_suspicious_processes` | Heuristic scan: name spoofing, wrong-path system processes, hollow process patterns, unsigned binaries in temp dirs, unusual parent-child chains. |
 | `get_startup_entries` | Registry Run keys and startup folder entries (lightweight). |
 
-### Stage 1 — Process Explorer (`procexp_path` required)
+### Stage 1 — Signing (built-in, no external tools)
 
 | Tool | Description |
 |---|---|
-| `get_process_tree` | Full parent-child tree with signing status and company info. |
+| `get_process_tree` | Full parent-child tree with Authenticode signing status. |
 | `get_unsigned_processes` | All running processes without a trusted digital signature. |
 
 ### Stage 2 — Autoruns (`autoruns_path` required)
@@ -531,7 +523,7 @@ processguard-mcp.exe  (stdio JSON-RPC 2.0 — MCP protocol)
 ├── internal/config        Config load, validation, and tool availability matrix
 ├── internal/audit         Append-only JSONL audit log (%APPDATA%\ProcessGuard\audit.log)
 ├── internal/geoip         MaxMind GeoLite2 wrapper + private-IP CIDR detection
-├── internal/procex        Process Explorer path verification
+├── internal/procex        (reserved, unused) procexp path check
 └── internal/tools
     ├── tools.go           Registry + Call() dispatcher + output sanitisation boundary
     └── handlers/
@@ -580,4 +572,4 @@ For security-related contributions, see [SECURITY.md](SECURITY.md) for the respo
 
 ProcessGuard MCP is released under the [MIT Licence](LICENSE).
 
-**Important third-party restriction:** If you use ProcessGuard with Sysinternals tools (by configuring `procexp_path` or `autoruns_path`), the [Microsoft Sysinternals Licence Terms](https://learn.microsoft.com/en-us/sysinternals/license-terms) apply to those tools. That licence prohibits use in commercial products without a separate agreement with Microsoft. See [LICENSE](LICENSE) for full details.
+**Important third-party restriction:** ProcessGuard bundles no Microsoft binaries. If you enable the optional Sysinternals-backed stages (by configuring `autoruns_path`, or installing Sysmon), the [Microsoft Sysinternals Licence Terms](https://learn.microsoft.com/en-us/sysinternals/license-terms) apply to those tools — that licence prohibits use in commercial products without a separate agreement with Microsoft. The core, Sysinternals-free stages carry no such restriction. See [LICENSE](LICENSE) for full details.

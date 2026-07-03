@@ -10,15 +10,12 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 IMPORTANT: THIRD-PARTY EXECUTABLES & REDISTRIBUTION
 
-ProcessGuard MCP includes or integrates with third-party utilities, specifically Microsoft Sysinternals (e.g., Sysmon, Process Explorer, Autoruns).
+ProcessGuard MCP bundles NO third-party binaries. Its releases ship only its own MIT-licensed Go binary and documentation. At runtime it OPTIONALLY integrates with Microsoft Sysinternals tools that the user obtains and installs themselves — specifically Autoruns (autorunsc.exe, Stage 2) and Sysmon (Stage 4, installed as a Windows service). No Sysinternals tool is required for the default capabilities: process enumeration, Authenticode signing (Stage 1 uses the built-in Windows Get-AuthenticodeSignature — Process Explorer is NOT used), network analysis, and VirusTotal.
 
-Ownership & Licensing: These third-party tools are the property of Microsoft Corporation and are NOT covered by the MIT License above. They are subject to the Microsoft Software License Terms for Sysinternals.
+Ownership & Licensing: Those Microsoft tools are the property of Microsoft Corporation, are NOT covered by the MIT License above, and are subject to the Microsoft Software License Terms for Sysinternals. ProcessGuard neither distributes nor modifies them.
 
+Redistribution Restriction: Microsoft's license terms generally prohibit redistributing Sysinternals binaries within third-party commercial products or monetized services without an express agreement from Microsoft. Because ProcessGuard bundles no Sysinternals binary, its own (cosign-signed) releases do not redistribute any Microsoft software.
 
-Redistribution Restriction: Microsoft's license terms generally prohibit the redistribution of Sysinternals binaries within third-party commercial products or monetized services without an express agreement from Microsoft.
+User Responsibility: By enabling the optional Sysinternals-backed stages (e.g., configuring autoruns_path, or installing Sysmon), the user obtains those tools directly from Microsoft and assumes all responsibility for compliance with Microsoft's licensing terms.
 
-
-User Responsibility: By using this software with Sysinternals integration enabled (e.g., procexp_path or autoruns_path configurations), the user assumes all responsibility for compliance with Microsoft’s licensing terms.
-
-
-Commercial Use Warning: If you intend to use ProcessGuard MCP as part of a commercial offering, you must ensure you have the appropriate rights from Microsoft to use their tools in that context.
+Commercial Use Warning: If you intend to use ProcessGuard MCP as part of a commercial offering WITH the Sysinternals-backed stages enabled, you must ensure you have the appropriate rights from Microsoft to use their tools in that context. The core, Sysinternals-free stages carry no such restriction.

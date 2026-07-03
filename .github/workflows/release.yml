@@ -10,6 +10,10 @@ permissions:
 
 jobs:
   goreleaser:
+    # Only the public repo publishes releases. goreleaser's release target is
+    # OpenProcessGuard-mcp; the private mirror's token can't write there (403), so
+    # skip the job on any other repo instead of failing the run.
+    if: github.repository == 'IkerPagoaga/OpenProcessGuard-mcp'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

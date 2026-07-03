@@ -1,5 +1,5 @@
 {
-  "procexp_path":  "C:\\Tools\\SysinternalsSuite\\procexp64.exe",
+  "procexp_path":  "",
   "autoruns_path": "C:\\Tools\\SysinternalsSuite\\autorunsc.exe",
   "tcpview_path":  "",
   "sysmon_log":    "Microsoft-Windows-Sysmon/Operational",

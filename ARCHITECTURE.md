@@ -59,7 +59,7 @@ disabled so `<`, `>`, `&` render literally.
 ## Design principles
 
 - **Read-only.** No tool mutates the system.
-- **Graceful degradation.** Optional stages (Process Explorer signing, Autoruns,
+- **Graceful degradation.** Optional stages (Autoruns,
   Sysmon, VirusTotal, GeoIP) are unavailable, never fatal, when unconfigured.
   Native Stage-0 tools always work.
 - **No secrets on the wire.** The VirusTotal key is never echoed in output, errors,

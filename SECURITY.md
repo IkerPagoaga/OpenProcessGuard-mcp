@@ -20,7 +20,7 @@ ProcessGuard MCP is a **read-only** Windows security monitoring tool. It observe
 ### What ProcessGuard does
 
 - Reads live OS data: running processes, network connections, loaded modules, startup entries, Sysmon event logs.
-- Calls optional external binaries you configure: `procexp64.exe`, `autorunsc.exe`.
+- Calls optional external binaries you configure: `autorunsc.exe` (Sysinternals Autoruns). Process Explorer is no longer used — Stage 1 signing is derived from the built-in `Get-AuthenticodeSignature`.
 - Makes outbound HTTPS requests to VirusTotal only when `vt_api_key` is configured and `lookup_hash` is called.
 - Writes an append-only audit log to `%APPDATA%\ProcessGuard\audit.log`.
 
@@ -110,7 +110,7 @@ govulncheck ./...
 
 ## Microsoft Sysinternals Licence
 
-ProcessGuard integrates with **Sysinternals** tools (Process Explorer, Autoruns) published by Microsoft. These tools are provided under the [Microsoft Software Licence Terms for Sysinternals](https://learn.microsoft.com/en-us/sysinternals/license-terms).
+ProcessGuard optionally integrates with **Sysinternals** tools (Autoruns for Stage 2, and Sysmon for Stage 4) published by Microsoft — it bundles none of them; you install them yourself. These tools are provided under the [Microsoft Software Licence Terms for Sysinternals](https://learn.microsoft.com/en-us/sysinternals/license-terms).
 
 **Key restrictions:**
 - Sysinternals tools may not be redistributed without Microsoft's permission.

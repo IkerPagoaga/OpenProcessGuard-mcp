@@ -30,6 +30,11 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 - Forensic fields (command lines, hashes, Sysmon XML) are no longer truncated to 512 runes or
   HTML-escaped in tool output.
 - `netstat` PID parsing is checked (a non-numeric PID is dropped, not coerced to System PID 0).
+- Process Explorer is no longer a dependency: Stage 1 uses the built-in `Get-AuthenticodeSignature`,
+  so the docs/LICENSE no longer instruct users to download it. LICENSE clarified — ProcessGuard bundles
+  no Microsoft binaries; only Autoruns (Stage 2) and Sysmon (Stage 4) are optional Sysinternals integrations.
+- Release workflow guarded to the public repo (`OpenProcessGuard-mcp`) so the private mirror stops failing
+  with a cross-repo 403 on publish.
 
 ### Security
 - SHA256 hashes are hex-validated before use in VirusTotal request URLs.
@@ -38,7 +43,7 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 ## [2.0.0] - 2026-04-01
 
 ### Added
-- 17 tools across 5 hunting stages (native, Process Explorer, Autoruns, Sysmon, VirusTotal, GeoIP).
+- 17 tools across 5 hunting stages (native, signing, Autoruns, Sysmon, VirusTotal, GeoIP).
 - Prompt-injection output sanitisation, PID/since-minutes bounds, `sysmon_log` whitelist,
   append-only audit log, threat model (SECURITY.md), MIT + Sysinternals-carve-out LICENSE.
 
