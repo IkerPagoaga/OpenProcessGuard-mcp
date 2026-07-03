@@ -50,7 +50,7 @@ func GetStartupEntries() (string, error) {
 			}
 			// Format: "    Name    REG_SZ    Value"
 			//         "    Name    REG_EXPAND_SZ    Value"
-			for _, regType := range []string{"REG_SZ", "REG_EXPAND_SZ"} {
+			for _, regType := range []string{"REG_SZ", "REG_EXPAND_SZ", "REG_MULTI_SZ"} {
 				if idx := strings.Index(line, regType); idx >= 0 {
 					name := strings.TrimSpace(line[:idx])
 					cmd := strings.TrimSpace(line[idx+len(regType):])

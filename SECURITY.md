@@ -2,7 +2,7 @@
 
 ## Overview
 
-ProcessGuard MCP is a **read-only** Windows security monitoring tool. It observes the local system and reports findings — it does not modify files, registry keys, network settings, or any system state. This document describes the threat model, known limitations, and how to report security issues responsibly.
+ProcessGuard MCP is a **read-only** Windows security monitoring tool: it observes the local system and reports findings, and performs no writes to the system it monitors. Two disclosed exceptions are its own append-only audit log (`%APPDATA%\ProcessGuard\audit.log`) and — only if you enable the optional Autoruns stage — the EULA-acceptance value that Microsoft's `autorunsc.exe -accepteula` records under `HKCU\Software\Sysinternals`. This document describes the threat model, known limitations, and how to report security issues responsibly.
 
 ---
 
@@ -27,7 +27,7 @@ ProcessGuard MCP is a **read-only** Windows security monitoring tool. It observe
 ### What ProcessGuard does NOT do
 
 - It opens **no listening ports** of any kind. The MCP server communicates exclusively over `stdin`/`stdout` with Claude Desktop — no TCP socket, no HTTP server, no named pipe exposed externally.
-- It does not write to the registry, modify files, or change system configuration.
+- ProcessGuard itself makes no registry writes, file modifications, or configuration changes to the monitored system. Two disclosed exceptions: its own append-only audit log, and the `HKCU\Software\Sysinternals\...\EulaAccepted` value written by Microsoft's `autorunsc.exe -accepteula` when you enable the optional Autoruns stage.
 - It does not exfiltrate data. The only outbound network call is VirusTotal HTTPS, and only when you explicitly configure an API key.
 - It does not escalate privileges on its own — it runs with whatever rights Claude Desktop was launched with.
 
@@ -74,6 +74,8 @@ The following mitigations are implemented:
 - It is sent only as an HTTPS header to `www.virustotal.com` — never logged, never included in tool responses.
 - `config.json` is excluded from the repository via `.gitignore` and must never be committed.
 - File permissions on `config.json` should be restricted: on Windows, ensure only your user account has read access (right-click → Properties → Security).
+- ProcessGuard reads `config.json` from its own install directory. When installed via `install.ps1` that is `%ProgramFiles%\ProcessGuard` (admin-only writable), so a non-admin cannot plant a malicious `config.json` that would point the elevated server at attacker-chosen tool paths. Do **not** relocate the binary to a user-writable directory or loosen that folder's ACL — either re-opens a config-plant vector. Editing the config therefore requires elevation, by design.
+- The legacy `PROCEXP_PATH` environment variable is still honoured for backward compatibility but is inert: Process Explorer is no longer used for signing (that now comes from `Get-AuthenticodeSignature`), so the value cannot influence detection.
 
 ---
 

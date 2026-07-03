@@ -16,7 +16,7 @@ const (
 	FlagTempPath        = "SUSPICIOUS_PATH"   // binary in Temp, AppData, Downloads, or Recycle Bin
 	FlagNoPath          = "NO_EXE_PATH"       // could not resolve executable path (common in hollow processes)
 	FlagSuspiciousChild = "SUSPICIOUS_PARENT" // unusual parent (e.g. Office spawning cmd/powershell)
-	FlagHollowPattern   = "HOLLOW_PATTERN"    // NO_PATH + WRONG_PATH combo — strong process-hollowing signal
+	FlagMasquerade      = "SYSTEM_MASQUERADE" // core system-process name running from a user-writable/temp dir — near-certain masquerade
 )
 
 // systemProcessPaths: legitimate system processes and their expected path fragments
@@ -64,6 +64,57 @@ var suspiciousParentChild = map[string][]string{
 	"iexplore.exe": {"cmd.exe", "powershell.exe", "wscript.exe"},
 }
 
+// nameSpoofMatch reports whether a process's lower-cased name is a known
+// lookalike of a system process. The base name (sans ".exe") must equal a
+// pattern EXACTLY — substring matching flagged legitimate names such as
+// "explorer.exe" (contains "explore") and "iexplore.exe" on every machine.
+func nameSpoofMatch(nameLower string) (string, bool) {
+	base := strings.TrimSuffix(nameLower, ".exe")
+	for _, spoof := range knownSpoofPatterns {
+		if base == spoof {
+			return spoof, true
+		}
+	}
+	return "", false
+}
+
+// coreSystemProcesses are OS processes that NEVER legitimately run from a
+// user-writable location. A copy of one in a temp dir is a near-certain
+// masquerade (CRITICAL). Deliberately excludes user-launchable / dual-use
+// binaries (explorer, cmd, powershell, rundll32): a portable or CI setup may
+// legitimately run those from a temp path, so they stay at WRONG_PATH /
+// SUSPICIOUS_PATH (HIGH/MEDIUM) rather than escalating to CRITICAL.
+var coreSystemProcesses = map[string]bool{
+	"svchost.exe": true, "lsass.exe": true, "csrss.exe": true,
+	"wininit.exe": true, "winlogon.exe": true, "services.exe": true,
+	"smss.exe": true, "spoolsv.exe": true, "taskhost.exe": true,
+	"taskhostw.exe": true, "conhost.exe": true, "dllhost.exe": true,
+}
+
+// masqueradeMatch reports a masquerade signal: a CORE system-process name whose
+// image lives in a suspicious (temp / appdata / downloads / recycle) directory.
+// Genuine svchost/lsass/csrss run only from System32, so one executing from a
+// user-writable temp path is a near-certain masquerade — the reachable source of
+// the Stage-1 CRITICAL escalation (FlagMasquerade was previously declared but
+// never emitted). It deliberately does NOT key off an empty image path: SYSTEM
+// processes return an empty path when ProcessGuard runs non-elevated, which would
+// false-fire on every healthy box. Note this detects on-disk *path* masquerade,
+// not in-memory process hollowing (which keeps the real System32 image path).
+func masqueradeMatch(nameLower, exeLower string) bool {
+	if exeLower == "" {
+		return false
+	}
+	if !coreSystemProcesses[nameLower] {
+		return false
+	}
+	for _, sd := range suspiciousDirs {
+		if strings.Contains(exeLower, sd) {
+			return true
+		}
+	}
+	return false
+}
+
 type SuspiciousProcess struct {
 	PID     int32    `json:"pid"`
 	Name    string   `json:"name"`
@@ -100,13 +151,10 @@ func GetSuspiciousProcesses() (string, error) {
 		var flags []string
 		var reasons []string
 
-		// 1. Name spoofing
-		for _, spoof := range knownSpoofPatterns {
-			if strings.Contains(nameLower, spoof) {
-				flags = append(flags, FlagNameSpoof)
-				reasons = append(reasons, fmt.Sprintf("name %q matches known spoof pattern %q", name, spoof))
-				break
-			}
+		// 1. Name spoofing (exact base-name match, not substring)
+		if spoof, ok := nameSpoofMatch(nameLower); ok {
+			flags = append(flags, FlagNameSpoof)
+			reasons = append(reasons, fmt.Sprintf("name %q matches known spoof pattern %q", name, spoof))
 		}
 
 		// 2. Wrong path for known system process
@@ -139,6 +187,14 @@ func GetSuspiciousProcesses() (string, error) {
 		if exe == "" {
 			flags = append(flags, FlagNoPath)
 			reasons = append(reasons, "could not resolve executable path")
+		}
+
+		// 4b. System masquerade: a core system-process NAME whose image lives in a
+		// user-writable/temp directory — the reachable source of the Stage-1
+		// CRITICAL escalation.
+		if masqueradeMatch(nameLower, exeLower) {
+			flags = append(flags, FlagMasquerade)
+			reasons = append(reasons, fmt.Sprintf("core system process %q running from a user-writable/temp path %q — near-certain masquerade", name, exe))
 		}
 
 		// 5. Suspicious parent-child

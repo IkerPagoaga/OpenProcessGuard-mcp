@@ -6,6 +6,51 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-07-03
+
+### Fixed
+- **Autoruns signing verdict inverted (false negative):** `autorunsc` emits the signer
+  as `(Not verified) <Publisher>`, but the check compared against the bare
+  `(Not verified)` string, so a real unverified entry was marked verified — suppressing
+  the `UNSIGNED` flag and the Stage-2 HIGH escalation. Verification is now a `(Verified)`
+  prefix test, and a "Microsoft" publisher is trusted only when actually verified.
+- **`explorer.exe` flagged as malware on every hunt:** the name-spoof check matched the
+  pattern `"explore"` as a substring, tripping on the legitimate Windows shell and
+  `iexplore.exe` (NAME_SPOOF → HIGH). Spoof patterns now match the base name exactly.
+- **Unreachable CRITICAL, renamed for accuracy:** the only Stage-1 CRITICAL was declared but
+  never emitted. It now fires as `SYSTEM_MASQUERADE` when a core system-process name (svchost,
+  lsass, csrss, …) runs from a user-writable/temp directory — a near-certain masquerade. It
+  detects on-disk path masquerade, not in-memory hollowing, hence the accurate name; dual-use
+  binaries (cmd/powershell/rundll32) from temp stay at HIGH rather than escalating to CRITICAL.
+- **Unsigned-process bypass:** `get_unsigned_processes` skipped any process whose signer
+  subject merely contained "microsoft"; an invalid or self-signed certificate naming
+  Microsoft no longer evades the check (trust requires a Valid Authenticode status).
+- **Silent scan failures:** a configured stage that errored returned no findings,
+  indistinguishable from a clean result. Failed stages now emit a visible `SCAN_ERROR`.
+- **Duplicate Autoruns scan:** `run_full_hunt` ran `autorunsc -a *` twice (Stages 2 and 5);
+  it now runs once and shares the parsed entries, roughly halving hunt time when Autoruns
+  is enabled.
+- GeoIP private-range detection now covers IPv6 link-local (`fe80::/10`) and CGNAT
+  (`100.64.0.0/10`), previously reported as foreign/internet.
+- VirusTotal `permalink` is now the human `gui/file/<hash>` URL, not the auth-only API
+  `self` link; the rate limiter refills gradually (a true token bucket) instead of
+  resetting at a fixed-window boundary; `startup` registry parsing also reads
+  `REG_MULTI_SZ` values.
+
+### Changed
+- Tool-execution failures are returned as MCP results with `isError: true` (so the model
+  sees the failure as tool output) rather than as JSON-RPC `-32603` transport errors.
+- `install.ps1` installs to `%ProgramFiles%\ProcessGuard` (admin-only) and requires
+  elevation, preventing a non-admin binary-plant against the elevated server.
+
+### Removed
+- Never-populated fields (`ProcessNode` company/description/cpu/mem; GeoIP `asn`/`asn_org`)
+  and the "country/ASN data" claim from `get_foreign_connections` (ASN was never produced).
+  README prompt-injection wording aligned with SECURITY.md — control-character stripping and
+  length caps only; semantic injection is not neutralised.
+
+## [2.1.0] - 2026-07-03
+
 ### Added
 - Central `internal/run` external-process runner with a bounded context timeout on
   every shell-out (a hung `netstat`/`powershell`/`reg`/`autorunsc` can no longer stall

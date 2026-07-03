@@ -13,8 +13,6 @@ type Location struct {
 	CountryCode string `json:"country_code"`
 	CountryName string `json:"country_name"`
 	City        string `json:"city,omitempty"`
-	ASN         uint   `json:"asn,omitempty"`
-	ASNOrg      string `json:"asn_org,omitempty"`
 	IsPrivate   bool   `json:"is_private"`
 }
 
@@ -89,9 +87,11 @@ func init() {
 		"172.16.0.0/12",
 		"192.168.0.0/16",
 		"127.0.0.0/8",
+		"100.64.0.0/10", // CGNAT (RFC 6598)
 		"::1/128",
 		"fc00::/7",
-		"169.254.0.0/16", // link-local
+		"169.254.0.0/16", // IPv4 link-local
+		"fe80::/10",      // IPv6 link-local
 	}
 	for _, c := range cidrs {
 		_, ipnet, err := net.ParseCIDR(c)

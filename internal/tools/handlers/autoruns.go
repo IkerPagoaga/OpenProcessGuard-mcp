@@ -44,6 +44,19 @@ var suspiciousAutorunDirs = []string{
 	`\downloads\`, `\recycle`, `\public\`,
 }
 
+// signingFromSigner interprets an autorunsc Signer column. autorunsc emits the
+// verification status as a PREFIX — "(Verified) <Publisher>" or
+// "(Not verified) <Publisher>" — so equality against the bare "(Not verified)"
+// (the previous check) treated every real "(Not verified) Foo" as verified.
+// "microsoft" is trusted only when the entry is actually verified, so a
+// "(Not verified) Microsoft ..." spoof no longer evades the UNSIGNED flag.
+func signingFromSigner(signer string) (verified, microsoft bool) {
+	s := strings.ToLower(strings.TrimSpace(signer))
+	verified = strings.HasPrefix(s, "(verified)")
+	microsoft = verified && strings.Contains(s, "microsoft")
+	return
+}
+
 // GetAutorunsEntries runs autorunsc.exe and returns all persistence entries.
 // Returns an error if autoruns_path is not configured.
 func GetAutorunsEntries(cfg *config.Config) (string, error) {
@@ -55,7 +68,12 @@ func GetAutorunsEntries(cfg *config.Config) (string, error) {
 	// signatures · -nobanner : no Sysinternals banner · -accepteula : headless.
 	args := []string{"-a", "*", "-c", "-h", "-s", "-nobanner", "-accepteula"}
 	if cfg.VTAPIKey != "" {
-		args = append(args, "-v") // -v queries VirusTotal; only with a key
+		// -v makes autorunsc submit hashes to VirusTotal via its OWN integration:
+		// it does NOT consume vt_api_key, and those calls are not counted against
+		// this server's per-hunt VT cap. It is enabled here only as a proxy for
+		// "the user has opted into VT"; run_full_hunt's Stage 5 performs the
+		// key-authenticated, rate-capped lookups.
+		args = append(args, "-v")
 	}
 
 	out, err := run.Tool(cfg.AutorunsPath, args...)
@@ -84,8 +102,7 @@ func GetAutorunsEntries(cfg *config.Config) (string, error) {
 		}
 		// Only derive signing verdicts when the signer column actually existed.
 		if r.SignerKnown {
-			e.IsVerified = r.Signer != "" && !strings.EqualFold(r.Signer, "(Not verified)")
-			e.IsMicrosoft = strings.Contains(strings.ToLower(r.Signer), "microsoft")
+			e.IsVerified, e.IsMicrosoft = signingFromSigner(r.Signer)
 		}
 		flagAutorunEntry(&e)
 		entries = append(entries, e)

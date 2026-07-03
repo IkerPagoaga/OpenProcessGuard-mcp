@@ -99,6 +99,14 @@ func sanitiseString(s string, maxLen int) string {
 	return b.String()
 }
 
+// SanitiseText makes an arbitrary string — e.g. an error message assembled
+// outside the normal tool-output path — safe to hand to the model: ASCII control
+// characters stripped, non-printable runes replaced, length-capped. main.go uses
+// it so isError content passes the same boundary as regular tool output.
+func SanitiseText(s string) string {
+	return sanitiseString(s, maxFieldLen)
+}
+
 // sanitiseJSON deserialises a JSON string, sanitises every string value in
 // the resulting tree, then re-serialises it. HTML escaping is disabled so that
 // forensic values containing <, >, or & render literally instead of as <
@@ -196,7 +204,7 @@ func Registry() []ToolDef {
 		},
 		{
 			Name:        "get_foreign_connections",
-			Description: "Return ESTABLISHED connections to non-private (internet) IP addresses, with GeoIP country/ASN data when geoip_db is configured. These are your primary data-exfiltration and C2 candidates.",
+			Description: "Return ESTABLISHED connections to non-private (internet) IP addresses, with GeoIP country data when geoip_db is configured. These are your primary data-exfiltration and C2 candidates.",
 			InputSchema: emptySchema(),
 		},
 

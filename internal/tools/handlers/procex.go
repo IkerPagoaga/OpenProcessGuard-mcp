@@ -14,13 +14,9 @@ type ProcessNode struct {
 	PID         int32          `json:"pid"`
 	Name        string         `json:"name"`
 	ExePath     string         `json:"exe_path"`
-	Company     string         `json:"company,omitempty"`
-	Description string         `json:"description,omitempty"`
 	Signer      string         `json:"signer"`
 	IsVerified  bool           `json:"is_verified"`
 	IsMicrosoft bool           `json:"is_microsoft"`
-	CPUPercent  float64        `json:"cpu_percent,omitempty"`
-	MemoryMB    float64        `json:"memory_mb,omitempty"`
 	Children    []*ProcessNode `json:"children,omitempty"`
 }
 
@@ -65,12 +61,9 @@ func GetUnsignedProcesses(cfg *config.Config) (string, error) {
 
 	var unsigned []UnsignedProcess
 	for _, p := range procs {
-		if p.IsVerified || p.IsMicrosoft {
+		list, reason := classifyUnsigned(p.Status)
+		if !list {
 			continue
-		}
-		reason := "no digital signature"
-		if p.Signer != "" {
-			reason = "signature present but not trusted by the system"
 		}
 		unsigned = append(unsigned, UnsignedProcess{
 			PID:     p.PID,
@@ -97,13 +90,42 @@ type procRow struct {
 	PPID        int32
 	Name        string
 	ExePath     string
-	Company     string
-	Description string
 	Signer      string
+	Status      string // raw Authenticode SignatureStatus ("" when not evaluated)
 	IsVerified  bool
 	IsMicrosoft bool
-	CPUPercent  float64
-	MemoryMB    float64
+}
+
+// signingFromStatus interprets an Authenticode result. A signature is trusted
+// only when its Status is "Valid"; "microsoft" in the subject is trusted only
+// when the signature itself is Valid, so an invalid or self-signed certificate
+// merely NAMING Microsoft does not evade get_unsigned_processes.
+func signingFromStatus(status, subject string) (verified, microsoft bool) {
+	verified = strings.EqualFold(status, "Valid")
+	microsoft = verified && strings.Contains(strings.ToLower(subject), "microsoft")
+	return
+}
+
+// classifyUnsigned decides whether a process belongs in the unsigned/untrusted
+// list, and why. A signature that could NOT be evaluated (empty status — e.g. an
+// unreadable SYSTEM binary when ProcessGuard runs non-elevated) is UNKNOWN, not
+// unsigned: reporting it as unsigned would bury real findings under a wall of
+// legitimate system processes. This mirrors the autoruns SignerKnown discipline.
+func classifyUnsigned(status string) (list bool, reason string) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "valid":
+		return false, "" // trusted
+	case "":
+		return false, "" // signature not evaluated (path unreadable) — unknown, not unsigned
+	case "notsigned":
+		return true, "no digital signature"
+	case "hashmismatch":
+		return true, "signature invalid (hash mismatch) — possible tampering"
+	case "nottrusted":
+		return true, "signature present but the issuer is not trusted by the system"
+	default:
+		return true, fmt.Sprintf("signature could not be verified (status: %s)", status)
+	}
 }
 
 // collectProcessesWithSigning enumerates processes via Win32_Process and resolves
@@ -168,14 +190,16 @@ Get-CimInstance Win32_Process | ForEach-Object {
 
 	rows := make([]procRow, 0, len(procs))
 	for _, p := range procs {
+		verified, microsoft := signingFromStatus(p.Status, p.Subject)
 		rows = append(rows, procRow{
 			PID:         p.ProcID,
 			PPID:        p.PPID,
 			Name:        p.Name,
 			ExePath:     p.Path,
 			Signer:      signerCN(p.Subject),
-			IsVerified:  strings.EqualFold(p.Status, "Valid"),
-			IsMicrosoft: strings.Contains(strings.ToLower(p.Subject), "microsoft"),
+			Status:      p.Status,
+			IsVerified:  verified,
+			IsMicrosoft: microsoft,
 		})
 	}
 	return rows, nil
@@ -202,13 +226,9 @@ func buildTree(procs []procRow) []*ProcessNode {
 			PID:         p.PID,
 			Name:        p.Name,
 			ExePath:     p.ExePath,
-			Company:     p.Company,
-			Description: p.Description,
 			Signer:      p.Signer,
 			IsVerified:  p.IsVerified,
 			IsMicrosoft: p.IsMicrosoft,
-			CPUPercent:  p.CPUPercent,
-			MemoryMB:    p.MemoryMB,
 		}
 	}
 

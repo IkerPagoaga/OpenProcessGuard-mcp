@@ -177,9 +177,6 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 					TypeUnsupported  int `json:"type-unsupported"`
 				} `json:"last_analysis_stats"`
 			} `json:"attributes"`
-			Links struct {
-				Self string `json:"self"`
-			} `json:"links"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &vtResp); err != nil {
@@ -194,7 +191,9 @@ func fetchVTReport(apiKey, sha256 string) (VTReport, error) {
 	report.TotalEngines = stats.Malicious + stats.Suspicious + stats.Undetected +
 		stats.Harmless + stats.Timeout + stats.ConfirmedTimeout + stats.Failure + stats.TypeUnsupported
 	report.Score = fmt.Sprintf("%d/%d", stats.Malicious, report.TotalEngines)
-	report.Permalink = vtResp.Data.Links.Self
+	// Human-facing GUI URL, not the API "self" link (which requires auth and is
+	// not viewable in a browser).
+	report.Permalink = "https://www.virustotal.com/gui/file/" + sha256
 
 	return report, nil
 }
@@ -222,11 +221,19 @@ func (tb *tokenBucket) Allow() bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
-	now := time.Now()
-	elapsed := now.Sub(tb.lastFill)
-	if elapsed >= tb.fillEvery {
-		tb.tokens = tb.capacity
-		tb.lastFill = now
+	// Refill gradually — one token per (fillEvery / capacity) — rather than
+	// resetting to full at a window boundary, which allowed a burst of up to
+	// 2x-capacity straddling the boundary. This is a real token bucket.
+	interval := tb.fillEvery / time.Duration(tb.capacity)
+	if interval <= 0 {
+		interval = tb.fillEvery
+	}
+	if refill := int(time.Since(tb.lastFill) / interval); refill > 0 {
+		tb.tokens += refill
+		if tb.tokens > tb.capacity {
+			tb.tokens = tb.capacity
+		}
+		tb.lastFill = tb.lastFill.Add(time.Duration(refill) * interval)
 	}
 
 	if tb.tokens <= 0 {

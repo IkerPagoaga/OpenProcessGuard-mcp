@@ -63,25 +63,34 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 
 	var findings []Finding
 
+	// Autoruns is the most expensive probe (autorunsc -a * scans every category,
+	// 10-30s). Stages 2 and 5 both consume it, so run it ONCE here and share the
+	// parsed entries rather than launching a second identical scan per hunt.
+	var autorunEntries []AutorunEntry
+	var autorunErr error
+	if avail.Autoruns {
+		raw, err := GetAutorunsEntries(cfg)
+		if err != nil {
+			autorunErr = err
+		} else if err := json.Unmarshal([]byte(raw), &autorunEntries); err != nil {
+			autorunErr = err
+		}
+	}
+
 	// ── Stage 1: Process Integrity ─────────────────────────────────
-	stage1Findings := runStage1(cfg)
-	findings = append(findings, stage1Findings...)
+	findings = append(findings, runStage1(cfg)...)
 
 	// ── Stage 2: Persistence (Autoruns) ───────────────────────────
-	stage2Findings := runStage2(cfg)
-	findings = append(findings, stage2Findings...)
+	findings = append(findings, runStage2(avail.Autoruns, autorunEntries, autorunErr)...)
 
 	// ── Stage 3: Network Visibility ────────────────────────────────
-	stage3Findings := runStage3(cfg)
-	findings = append(findings, stage3Findings...)
+	findings = append(findings, runStage3(cfg)...)
 
 	// ── Stage 4: Sysmon Forensics (last 60 min) ───────────────────
-	stage4Findings := runStage4(cfg)
-	findings = append(findings, stage4Findings...)
+	findings = append(findings, runStage4(cfg)...)
 
 	// ── Stage 5: VirusTotal Hash Escalation ────────────────────────
-	stage5Findings := runStage5(cfg)
-	findings = append(findings, stage5Findings...)
+	findings = append(findings, runStage5(cfg, avail, autorunEntries)...)
 
 	// Bucket findings by severity
 	report.Findings = findings
@@ -134,18 +143,18 @@ func runStage1(cfg *config.Config) []Finding {
 
 	raw, err := GetSuspiciousProcesses()
 	if err != nil {
-		return findings
+		return append(findings, scanError(1, "process-integrity", err))
 	}
 	var procs []SuspiciousProcess
 	if err := json.Unmarshal([]byte(raw), &procs); err != nil {
-		return findings
+		return append(findings, scanError(1, "process-integrity", err))
 	}
 
 	for _, p := range procs {
 		severity := SeverityMedium
 		for _, flag := range p.Flags {
 			switch flag {
-			case FlagHollowPattern:
+			case FlagMasquerade:
 				severity = SeverityCritical
 			case FlagNameSpoof, FlagWrongPath:
 				if severity != SeverityCritical {
@@ -166,10 +175,12 @@ func runStage1(cfg *config.Config) []Finding {
 	return findings
 }
 
-// runStage2 runs autorun anomaly detection if Autoruns is configured.
-func runStage2(cfg *config.Config) []Finding {
+// runStage2 maps flagged autorun entries to findings. The entries are fetched
+// once in RunFullHunt and shared with Stage 5 (previously each stage re-ran
+// autorunsc, doubling hunt time). A fetch error is surfaced, not swallowed.
+func runStage2(available bool, entries []AutorunEntry, fetchErr error) []Finding {
 	var findings []Finding
-	if !cfg.Availability().Autoruns {
+	if !available {
 		findings = append(findings, Finding{
 			Stage:       2,
 			Severity:    SeverityInfo,
@@ -180,17 +191,14 @@ func runStage2(cfg *config.Config) []Finding {
 		})
 		return findings
 	}
-
-	raw, err := FlagAutorunsAnomalies(cfg)
-	if err != nil {
-		return findings
-	}
-	var entries []AutorunEntry
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		return findings
+	if fetchErr != nil {
+		return append(findings, scanError(2, "autoruns", fetchErr))
 	}
 
 	for _, e := range entries {
+		if len(e.Flags) == 0 {
+			continue // only surface anomalous (flagged) entries
+		}
 		severity := SeverityMedium
 		if e.VTDetections > 0 {
 			severity = SeverityCritical
@@ -218,11 +226,11 @@ func runStage3(cfg *config.Config) []Finding {
 
 	raw, err := GetForeignConnections(cfg)
 	if err != nil {
-		return findings
+		return append(findings, scanError(3, "network", err))
 	}
 	var conns []EnrichedConnection
 	if err := json.Unmarshal([]byte(raw), &conns); err != nil {
-		return findings
+		return append(findings, scanError(3, "network", err))
 	}
 
 	for _, c := range conns {
@@ -261,7 +269,9 @@ func runStage4(cfg *config.Config) []Finding {
 
 	// ── ID 1: ProcessCreate — suspicious parent-child spawns ────────────
 	rawCreate, err := GetProcessCreateEvents(cfg, 60)
-	if err == nil {
+	if err != nil {
+		findings = append(findings, scanError(4, "sysmon-processcreate", err))
+	} else {
 		var createEvents []SysmonEvent
 		if json.Unmarshal([]byte(rawCreate), &createEvents) == nil {
 			for _, e := range createEvents {
@@ -292,7 +302,9 @@ func runStage4(cfg *config.Config) []Finding {
 
 	// ── ID 3: NetworkConnect — detect unusual outbound connections ───────
 	rawNet, err := GetNetworkEvents(cfg, 60)
-	if err == nil {
+	if err != nil {
+		findings = append(findings, scanError(4, "sysmon-network", err))
+	} else {
 		var netEvents []SysmonEvent
 		if json.Unmarshal([]byte(rawNet), &netEvents) == nil {
 			// Beacon indicator: scripting hosts / admin tools making outbound internet connections
@@ -384,11 +396,12 @@ func lowerBase(path string) string {
 }
 
 // runStage5 performs VirusTotal hash lookups on autoruns entries that carry
-// a SHA256. Any entry with VT detections is escalated to CRITICAL.
-// Skipped silently when vt_api_key is not configured.
-func runStage5(cfg *config.Config) []Finding {
+// a SHA256. Any entry with VT detections is escalated to CRITICAL. The entries
+// are the ones already fetched once in RunFullHunt (shared with Stage 2).
+// Skipped when vt_api_key is not configured.
+func runStage5(cfg *config.Config, avail config.ToolAvailability, entries []AutorunEntry) []Finding {
 	var findings []Finding
-	if !cfg.Availability().VirusTotal {
+	if !avail.VirusTotal {
 		findings = append(findings, Finding{
 			Stage:       5,
 			Severity:    SeverityInfo,
@@ -399,17 +412,8 @@ func runStage5(cfg *config.Config) []Finding {
 		})
 		return findings
 	}
-	if !cfg.Availability().Autoruns {
+	if !avail.Autoruns {
 		return findings // nothing to score without autoruns hashes
-	}
-
-	raw, err := GetAutorunsEntries(cfg)
-	if err != nil {
-		return findings
-	}
-	var entries []AutorunEntry
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		return findings
 	}
 
 	checked := 0
@@ -449,8 +453,30 @@ func runStage5(cfg *config.Config) []Finding {
 	return findings
 }
 
+// scanError surfaces a stage that failed to complete as a visible finding, so a
+// crashed or erroring probe is never silently mistaken for a clean result.
+func scanError(stage int, entity string, err error) Finding {
+	return Finding{
+		Stage:       stage,
+		Severity:    SeverityInfo,
+		Category:    "SCAN_ERROR",
+		Description: fmt.Sprintf("Stage %d (%s) did not complete: %v — findings for this stage may be incomplete.", stage, entity, err),
+		Entity:      entity,
+		Confidence:  "HIGH",
+	}
+}
+
 func buildRecommendations(r HuntReport) []string {
 	var recs []string
+	stageErrors := 0
+	for _, f := range r.Findings {
+		if f.Category == "SCAN_ERROR" {
+			stageErrors++
+		}
+	}
+	if stageErrors > 0 {
+		recs = append(recs, fmt.Sprintf("INVESTIGATE: %d hunting stage(s) failed to complete — re-run (elevated if needed); a partial hunt can hide threats in the stages that did not run.", stageErrors))
+	}
 	if len(r.Critical) > 0 {
 		recs = append(recs, fmt.Sprintf("IMMEDIATE: Investigate %d CRITICAL finding(s) — these indicate active or confirmed compromise.", len(r.Critical)))
 	}
@@ -473,13 +499,23 @@ func buildRecommendations(r HuntReport) []string {
 }
 
 func buildSummary(r HuntReport) string {
+	stageErrors := 0
+	for _, f := range r.Findings {
+		if f.Category == "SCAN_ERROR" {
+			stageErrors++
+		}
+	}
+	partial := ""
+	if stageErrors > 0 {
+		partial = fmt.Sprintf(" WARNING: %d stage(s) did not complete — results are PARTIAL; absence of findings is NOT proof of a clean system (re-run elevated).", stageErrors)
+	}
 	total := len(r.Findings)
 	if total == 0 {
-		return "Full hunt complete. No suspicious indicators were detected across all configured stages."
+		return "Full hunt complete. No suspicious indicators were detected across all configured stages." + partial
 	}
 	return fmt.Sprintf(
 		"Hunt complete in %dms. Found %d indicator(s): %d CRITICAL, %d HIGH, %d MEDIUM, %d INFO. "+
-			"Immediate review required for CRITICAL and HIGH findings.",
-		r.DurationMs, total, len(r.Critical), len(r.High), len(r.Medium), len(r.Info),
+			"Immediate review required for CRITICAL and HIGH findings.%s",
+		r.DurationMs, total, len(r.Critical), len(r.High), len(r.Medium), len(r.Info), partial,
 	)
 }

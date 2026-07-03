@@ -12,7 +12,7 @@ ProcessGuard exposes live process telemetry, persistence checks, network analysi
 
 **Open source, fully auditable.** Every line of code is public. No telemetry, no phone-home, no hidden behaviour. If you don't trust it, read it.
 
-**Security by design.** ProcessGuard opens no listening ports. It communicates exclusively over `stdin`/`stdout` with Claude Desktop. All OS-sourced strings are sanitised before reaching Claude's context window to mitigate prompt injection. Environment variable secrets are redacted. The VirusTotal API key never appears in tool output or logs.
+**Security by design.** ProcessGuard opens no listening ports. It communicates exclusively over `stdin`/`stdout` with Claude Desktop. OS-sourced strings are stripped of control characters and length-capped before reaching Claude — this defeats terminal-escape and zero-width/bidi tricks but **cannot** neutralise semantic injection, so tool output is treated as evidence, never instructions. Environment variable secrets are redacted. The VirusTotal API key never appears in tool output or logs.
 
 **Read-only.** ProcessGuard observes — it does not modify files, registry keys, network settings, or any system state.
 
@@ -495,7 +495,7 @@ ProcessGuard opens **zero listening ports**. It communicates exclusively over `s
 
 ### Prompt injection mitigations
 
-ProcessGuard collects raw OS data and passes it into Claude's context window. An adversary with local code execution could craft process names or registry keys that look like LLM instructions. The following mitigations are implemented:
+ProcessGuard collects raw OS data and passes it into Claude's context window. An adversary with local code execution could craft process names or registry keys that look like LLM instructions. The mitigations below strip control characters and cap length — defeating terminal-escape and zero-width/bidi tricks — but they **cannot** neutralise *semantic* injection: a value literally reading "ignore previous instructions and…" passes through unchanged. Tool output is therefore evidence for Claude to reason about, never instructions to follow. The following mitigations are implemented:
 
 - **String truncation** — string fields are capped before leaving the MCP boundary: 512 characters by default, and 16384 for forensic-evidence fields (command lines, hashes, Sysmon XML) so they aren't cut off (those fields carry a larger injection surface by design).
 - **Control character stripping** — ASCII control characters (< 0x20, DEL) are stripped from all output.

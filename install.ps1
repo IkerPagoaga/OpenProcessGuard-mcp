@@ -4,9 +4,12 @@
     Install ProcessGuard MCP and register it with Claude Desktop.
 
 .DESCRIPTION
-    Installs the processguard-mcp binary under %LOCALAPPDATA%\ProcessGuard and adds an
-    entry to Claude Desktop's claude_desktop_config.json. Native Stage-0 tools work
-    immediately with no further configuration.
+    Installs the processguard-mcp binary under %ProgramFiles%\ProcessGuard (an
+    admin-only-writable location) and adds an entry to Claude Desktop's
+    claude_desktop_config.json. The server runs elevated, so a user-writable install
+    dir would let a standard user or malware swap the binary that then runs with
+    Administrator rights — hence Program Files. Must be run from an elevated PowerShell.
+    Native Stage-0 tools work immediately with no further configuration.
 
     With -BinaryPath, installs a prebuilt (signed release) binary. Without it, builds
     from source using `go build` (requires Go 1.22+).
@@ -31,7 +34,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$installDir = Join-Path $env:LOCALAPPDATA 'ProcessGuard'
+# The server runs elevated, so its binary must live where a non-admin cannot
+# replace it (otherwise: plant a malicious exe, wait for the next elevated run).
+# Program Files is admin-only-writable; installing there requires elevation.
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    throw "This installer must run elevated. Installing to $env:ProgramFiles\ProcessGuard (admin-only) prevents binary-planting against the elevated server. Re-run from an Administrator PowerShell."
+}
+
+$installDir = Join-Path $env:ProgramFiles 'ProcessGuard'
 $target = Join-Path $installDir 'processguard-mcp.exe'
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
@@ -101,4 +112,5 @@ else {
 Write-Host ""
 Write-Host "Done. Restart Claude Desktop, then ask it to run 'list_processes'." -ForegroundColor Cyan
 Write-Host "Native tools work now. To enable optional stages (Autoruns / Sysmon / VirusTotal / GeoIP),"
-Write-Host "copy config.example.json to '$installDir\config.json' and fill in the paths/keys."
+Write-Host "copy config.example.json to '$installDir\config.json' (an admin-only write, which also keeps"
+Write-Host "the VT API key and tool paths out of reach of non-admin tampering) and fill in the paths/keys."

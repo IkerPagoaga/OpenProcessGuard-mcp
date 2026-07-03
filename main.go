@@ -177,7 +177,16 @@ func dispatch(cfg *config.Config, req Request) (interface{}, *RPCError) {
 			content, err = tools.Call(cfg, p.Name, p.Arguments)
 		}()
 		if err != nil {
-			return nil, &RPCError{Code: -32603, Message: fmt.Sprintf("Tool error: %v", err)}
+			// MCP convention: a tool that RAN but failed returns a normal result
+			// with isError=true and the message as content, so the model sees the
+			// failure as tool output. Transport/protocol errors (invalid params,
+			// unknown method) still use JSON-RPC error codes.
+			return map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": tools.SanitiseText(fmt.Sprintf("Tool error: %v", err))},
+				},
+				"isError": true,
+			}, nil
 		}
 		return map[string]interface{}{
 			"content": []map[string]interface{}{
