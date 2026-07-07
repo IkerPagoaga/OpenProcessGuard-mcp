@@ -39,8 +39,9 @@ cd OpenProcessGuard-mcp
 .\install.ps1
 ```
 
-`install.ps1` installs the binary under `%LOCALAPPDATA%\ProcessGuard` and registers it with
-Claude Desktop. Restart Claude Desktop and ask it to run `list_processes`. **Native tools work
+`install.ps1` installs the binary under `%ProgramFiles%\ProcessGuard` — an admin-only-writable
+location, so a non-elevated attacker cannot plant a trojaned binary that the elevated server would
+run — and registers it with Claude Desktop. Restart Claude Desktop and ask it to run `list_processes`. **Native tools work
 immediately with no config file** — add `config.json` (copy `config.example.json`) only to enable
 the optional Autoruns / Sysmon / VirusTotal / GeoIP stages.
 
@@ -500,7 +501,7 @@ ProcessGuard collects raw OS data and passes it into Claude's context window. An
 - **String truncation** — string fields are capped before leaving the MCP boundary: 512 characters by default, and 16384 for forensic-evidence fields (command lines, hashes, Sysmon XML) so they aren't cut off (those fields carry a larger injection surface by design).
 - **Control character stripping** — ASCII control characters (< 0x20, DEL) are stripped from all output.
 - **Config validation** — `sysmon_log` is validated against a strict character allowlist at startup to prevent PowerShell injection.
-- **Env var redaction** — `get_process_detail` redacts values for env vars matching: `token`, `secret`, `password`, `key`, `apikey`, `credential`, `auth`, `private`, `cert`, `jwt`, `bearer`.
+- **Env var redaction** — `get_process_detail` redacts an env var's value when its NAME matches a secret pattern (`token`, `secret`, `password`, `key`, `credential`, `auth`, `private`, `cert`, `jwt`, `bearer`, or a connection-string / DSN name) OR its VALUE carries a well-known secret prefix (`ghp_`, `AKIA`, `xox…`, `sk-`, `AIza`, PEM, JWT) — so a credential in an oddly-named variable is caught too.
 - **VT API key isolation** — never echoed in any tool response or written to the audit log.
 
 See [SECURITY.md](SECURITY.md) for the full threat model and responsible disclosure process.

@@ -6,6 +6,53 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-07-06
+
+### Added
+- **`run_full_hunt` Stage 1 now runs the Authenticode signing lens** alongside the
+  gopsutil heuristics. A plain unsigned or untrusted binary that trips no heuristic
+  (not name-spoofing, not in a temp dir, not Office-spawned) previously produced zero
+  findings in the flagship hunt, even though `get_unsigned_processes` would surface it.
+  Tampering (`HashMismatch`) and untrusted issuers (`NotTrusted`) escalate to HIGH;
+  merely-unsigned processes are surfaced as INFO and counted (unsigned is common for
+  legitimate software); a signature present-but-unverifiable is reported as
+  UNVERIFIED (not "unsigned"); an un-evaluable signature (unreadable path when
+  non-elevated) is treated as UNKNOWN and skipped. The pass runs under a bounded
+  sub-timeout and degrades to an INFO note — never a whole-hunt PARTIAL — if it
+  cannot complete.
+
+### Security
+- System binaries (`netstat`, `reg`, `tasklist`, `powershell`) are executed by their
+  absolute, canonical `C:\Windows\System32` path — resolved WITHOUT trusting the
+  `%SystemRoot%` environment variable — instead of a bare name, closing a PATH-order
+  hijack against the elevated server. Operator-configured tool paths (e.g. `autorunsc`)
+  are unchanged.
+- `get_process_detail` env-var redaction now also catches connection-string / DSN
+  variable names and values carrying a well-known secret prefix (`ghp_`, `AKIA`,
+  `xox…`, `sk-`, `AIza`, PEM, JWT), so a credential in an oddly-named variable no
+  longer leaks into the model context.
+
+### Fixed
+- README documented the install path as `%LOCALAPPDATA%\ProcessGuard`; `install.ps1`
+  actually installs to the admin-only `%ProgramFiles%\ProcessGuard`. The docs now match
+  the code and its anti-binary-plant rationale.
+- `query_sysmon_events` clamps an out-of-range `since_minutes` to the valid window
+  (matching `get_process_create_events` / `get_network_events`) instead of erroring.
+- Corrected the `run_full_hunt` "4-stage" label (it runs five stages) across the tool
+  description and code comments; SECURITY.md changelog now reflects the real v2.1.x
+  release history.
+
+### Changed
+- `list_processes` documents that `cpu_percent` is a cumulative average over the
+  process's lifetime, not an instantaneous sample.
+- Documented that the heuristic parent-child check uses a live PID→name snapshot (which
+  misses an already-exited parent and is PPID-spoofable); Sysmon Event 1 in Stage 4 is
+  authoritative for that pattern where Sysmon is present.
+- First unit tests for `internal/run` (absolute-path resolver + command timeout), the
+  `tools` dispatch/validation layer (`dispatchPID` bounds, `sinceArg` clamp,
+  `safeAuditArgs` redaction), env-var redaction, and the Stage-1 signing-lens classifier
+  (`signingFindings`) — the untested paths the external review flagged.
+
 ## [2.1.2] - 2026-07-03
 
 ### Security

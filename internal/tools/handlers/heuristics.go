@@ -197,7 +197,14 @@ func GetSuspiciousProcesses() (string, error) {
 			reasons = append(reasons, fmt.Sprintf("core system process %q running from a user-writable/temp path %q — near-certain masquerade", name, exe))
 		}
 
-		// 5. Suspicious parent-child
+		// 5. Suspicious parent-child.
+		//
+		// NOTE: resolved from a live PID→name snapshot, so this misses a parent
+		// that already exited (common for the Office→cmd/powershell pattern being
+		// hunted) and is PPID-spoofable. Sysmon Event 1 (Stage 4 of run_full_hunt)
+		// records the real ParentImage and is authoritative for this pattern where
+		// Sysmon is present; this live check is a best-effort supplement for boxes
+		// without Sysmon.
 		if ppid, err := p.Ppid(); err == nil {
 			parentName := pidToName[ppid]
 			if badChildren, ok := suspiciousParentChild[parentName]; ok {

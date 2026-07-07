@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"processguard-mcp/internal/config"
@@ -18,7 +19,7 @@ const (
 
 // Finding is a single threat indicator surfaced during the hunt.
 type Finding struct {
-	Stage       int      `json:"stage"`    // 1=ProcEx, 2=Autoruns, 3=Network, 4=Sysmon
+	Stage       int      `json:"stage"`    // 1=ProcessIntegrity, 2=Autoruns, 3=Network, 4=Sysmon, 5=VirusTotal
 	Severity    string   `json:"severity"` // CRITICAL/HIGH/MEDIUM/INFO
 	Category    string   `json:"category"` // e.g. "PROCESS_HOLLOWING", "C2_BEACON"
 	Description string   `json:"description"`
@@ -47,7 +48,7 @@ type HuntReport struct {
 	RecommendedActions []string  `json:"recommended_actions"`
 }
 
-// RunFullHunt orchestrates all four hunting stages and returns a HuntReport.
+// RunFullHunt orchestrates all five hunting stages and returns a HuntReport.
 func RunFullHunt(cfg *config.Config) (string, error) {
 	start := time.Now()
 	report := HuntReport{
@@ -77,7 +78,7 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 		}
 	}
 
-	// ── Stage 1: Process Integrity ─────────────────────────────────
+	// ── Stage 1: Process Integrity (heuristics + Authenticode signing) ──
 	findings = append(findings, runStage1(cfg)...)
 
 	// ── Stage 2: Persistence (Autoruns) ───────────────────────────
@@ -137,39 +138,159 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 	return string(result), nil
 }
 
-// runStage1 runs get_suspicious_processes and maps flags to Finding objects.
+// runStage1 runs the process-integrity checks: the gopsutil heuristic scan
+// (get_suspicious_processes) AND the Authenticode signing lens. The two are
+// independent — a signing failure does not suppress the heuristic findings and
+// vice versa. Adding the signing lens closes a real gap: a plain unsigned or
+// untrusted binary that trips no heuristic (not name-spoofing, not in a temp
+// dir, not Office-spawned) previously produced zero findings in the full hunt,
+// even though the standalone get_unsigned_processes tool would surface it.
 func runStage1(cfg *config.Config) []Finding {
 	var findings []Finding
 
+	// 1a. Heuristic scan — name spoof / wrong path / temp dir / masquerade / parent.
 	raw, err := GetSuspiciousProcesses()
 	if err != nil {
-		return append(findings, scanError(1, "process-integrity", err))
-	}
-	var procs []SuspiciousProcess
-	if err := json.Unmarshal([]byte(raw), &procs); err != nil {
-		return append(findings, scanError(1, "process-integrity", err))
+		findings = append(findings, scanError(1, "process-integrity", err))
+	} else {
+		var procs []SuspiciousProcess
+		if err := json.Unmarshal([]byte(raw), &procs); err != nil {
+			findings = append(findings, scanError(1, "process-integrity", err))
+		} else {
+			for _, p := range procs {
+				severity := SeverityMedium
+				for _, flag := range p.Flags {
+					switch flag {
+					case FlagMasquerade:
+						severity = SeverityCritical
+					case FlagNameSpoof, FlagWrongPath:
+						if severity != SeverityCritical {
+							severity = SeverityHigh
+						}
+					}
+				}
+				findings = append(findings, Finding{
+					Stage:       1,
+					Severity:    severity,
+					Category:    "SUSPICIOUS_PROCESS",
+					Description: p.Reason,
+					Entity:      fmt.Sprintf("PID %d (%s) @ %s", p.PID, p.Name, p.ExePath),
+					Flags:       p.Flags,
+					Confidence:  "MEDIUM",
+				})
+			}
+		}
 	}
 
+	// 1b. Authenticode signing lens.
+	findings = append(findings, runStage1Signing()...)
+	return findings
+}
+
+// runStage1Signing surfaces processes whose Authenticode signature is missing or
+// untrusted — the lens get_unsigned_processes/get_process_tree expose as
+// standalone tools but which the heuristic scan does not cover. It reuses the
+// shared collectProcessesWithSigning enumeration (also used by those tools).
+//
+// Severity is deliberately conservative to keep signal-to-noise sane: tampering
+// (hash mismatch) and an untrusted issuer are HIGH; a merely-unsigned binary is
+// INFO (unsigned is common for legitimate software, so it is made visible and
+// counted, not escalated). A signature that could not be evaluated (an
+// unreadable path when ProcessGuard runs non-elevated) is UNKNOWN and skipped,
+// mirroring classifyUnsigned — reporting those would bury real findings under a
+// wall of legitimate SYSTEM processes.
+func runStage1Signing() []Finding {
+	// The signing lens gets a tighter budget than the default: a slow whole-system
+	// Authenticode pass (cold-cache revocation on a networked box) then degrades to
+	// a stage-scoped INFO instead of a SCAN_ERROR that would flip the entire hunt
+	// report to PARTIAL — the heuristic half of Stage 1 already ran.
+	procs, err := collectProcessesWithSigning(25 * time.Second)
+	if err != nil {
+		return []Finding{{
+			Stage:       1,
+			Severity:    SeverityInfo,
+			Category:    "SIGNING_LENS_UNAVAILABLE",
+			Description: fmt.Sprintf("Authenticode signing lens did not complete (%v) — run get_unsigned_processes / get_process_tree directly to check process signatures.", err),
+			Entity:      "process-signing",
+			Confidence:  "HIGH",
+		}}
+	}
+	return signingFindings(procs)
+}
+
+// signingFindings is the pure classification half of the Stage-1 signing lens —
+// []procRow in, []Finding out — so the severity mapping is unit-testable without
+// spawning PowerShell (the exact test gap that let the earlier detection bugs
+// through).
+func signingFindings(procs []procRow) []Finding {
+	const maxUnsignedListed = 20
+	var findings []Finding
+	unsignedCount, listed := 0, 0
+
 	for _, p := range procs {
-		severity := SeverityMedium
-		for _, flag := range p.Flags {
-			switch flag {
-			case FlagMasquerade:
-				severity = SeverityCritical
-			case FlagNameSpoof, FlagWrongPath:
-				if severity != SeverityCritical {
-					severity = SeverityHigh
-				}
+		list, reason := classifyUnsigned(p.Status)
+		if !list {
+			continue
+		}
+		entity := fmt.Sprintf("PID %d (%s) @ %s", p.PID, p.Name, p.ExePath)
+
+		switch strings.ToLower(strings.TrimSpace(p.Status)) {
+		case "hashmismatch", "nottrusted":
+			// Tampering / untrusted issuer — unambiguous, always escalated.
+			findings = append(findings, Finding{
+				Stage:       1,
+				Severity:    SeverityHigh,
+				Category:    "UNTRUSTED_SIGNATURE",
+				Description: fmt.Sprintf("Process %q (PID %d) at %s: %s", p.Name, p.PID, p.ExePath, reason),
+				Entity:      entity,
+				Flags:       []string{"UNTRUSTED_SIGNATURE"},
+				Confidence:  "MEDIUM",
+			})
+		case "notsigned":
+			unsignedCount++
+			if listed < maxUnsignedListed {
+				listed++
+				findings = append(findings, Finding{
+					Stage:       1,
+					Severity:    SeverityInfo,
+					Category:    "UNSIGNED_PROCESS",
+					Description: fmt.Sprintf("Unsigned process %q (PID %d) at %s — %s. Unsigned is common for legitimate software; triage with lookup_hash.", p.Name, p.PID, p.ExePath, reason),
+					Entity:      entity,
+					Flags:       []string{"UNSIGNED"},
+					Confidence:  "LOW",
+				})
 			}
+		default:
+			// A signature is present but could not be verified (UnknownError,
+			// unsupported format, …) — reported honestly as UNVERIFIED, not
+			// asserted to be "unsigned".
+			if listed < maxUnsignedListed {
+				listed++
+				findings = append(findings, Finding{
+					Stage:       1,
+					Severity:    SeverityInfo,
+					Category:    "UNVERIFIED_SIGNATURE",
+					Description: fmt.Sprintf("Process %q (PID %d) at %s — %s.", p.Name, p.PID, p.ExePath, reason),
+					Entity:      entity,
+					Flags:       []string{"SIGNATURE_UNVERIFIED"},
+					Confidence:  "LOW",
+				})
+			}
+		}
+	}
+
+	if unsignedCount > 0 {
+		extra := ""
+		if unsignedCount > maxUnsignedListed {
+			extra = fmt.Sprintf(" First %d listed above; run get_unsigned_processes for the full set.", maxUnsignedListed)
 		}
 		findings = append(findings, Finding{
 			Stage:       1,
-			Severity:    severity,
-			Category:    "SUSPICIOUS_PROCESS",
-			Description: p.Reason,
-			Entity:      fmt.Sprintf("PID %d (%s) @ %s", p.PID, p.Name, p.ExePath),
-			Flags:       p.Flags,
-			Confidence:  "MEDIUM",
+			Severity:    SeverityInfo,
+			Category:    "UNSIGNED_SUMMARY",
+			Description: fmt.Sprintf("Authenticode: %d running process(es) without a trusted signature.%s", unsignedCount, extra),
+			Entity:      "process-signing",
+			Confidence:  "HIGH",
 		})
 	}
 	return findings

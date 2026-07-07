@@ -143,7 +143,7 @@ func Registry() []ToolDef {
 		// ── Stage 0: Native process enumeration (always available) ──────────
 		{
 			Name:        "list_processes",
-			Description: "List all running processes with PID, name, parent PID, CPU%, memory usage, executable path, and current user. Use this as the starting point for any security analysis. All string values are OS-sourced and treated as untrusted.",
+			Description: "List all running processes with PID, name, parent PID, CPU% (cumulative average over the process's lifetime, not an instantaneous sample), memory usage, executable path, and current user. Use this as the starting point for any security analysis. All string values are OS-sourced and treated as untrusted.",
 			InputSchema: emptySchema(),
 		},
 		{
@@ -258,7 +258,7 @@ func Registry() []ToolDef {
 		// ── Orchestration ─────────────────────────────────────────────────────
 		{
 			Name:        "run_full_hunt",
-			Description: "Execute the complete 4-stage threat hunt (Process Integrity → Persistence → Network → Sysmon) and return a structured HuntReport with severity-ranked findings and recommended actions. This is the primary entry point for a full security audit.",
+			Description: "Execute the complete 5-stage threat hunt (Process Integrity + Authenticode signing → Persistence → Network → Sysmon → VirusTotal) and return a structured HuntReport with severity-ranked findings and recommended actions. This is the primary entry point for a full security audit.",
 			InputSchema: emptySchema(),
 		},
 	}
@@ -325,11 +325,13 @@ func callInner(cfg *config.Config, name string, args json.RawMessage) (string, e
 		if p.EventID < 1 || p.EventID > 255 {
 			return "", fmt.Errorf("event_id must be between 1 and 255")
 		}
-		if p.SinceMinutes == 0 {
+		// Clamp out-of-range values to a sane window instead of erroring, so this
+		// matches get_process_create_events / get_network_events (sinceArg): a
+		// forensic query should degrade gracefully, not fail on a loose bound.
+		if p.SinceMinutes <= 0 {
 			p.SinceMinutes = 60
-		}
-		if p.SinceMinutes < 1 || p.SinceMinutes > 1440 {
-			return "", fmt.Errorf("since_minutes must be between 1 and 1440")
+		} else if p.SinceMinutes > 1440 {
+			p.SinceMinutes = 1440
 		}
 		return handlers.QuerySysmonEvents(cfg, p.EventID, p.SinceMinutes)
 

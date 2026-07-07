@@ -10,19 +10,57 @@ import (
 	"processguard-mcp/internal/run"
 )
 
-// secretPatterns are env var name substrings that indicate sensitive values.
-// Matched case-insensitively. Matching vars are replaced with "[REDACTED]".
+// secretPatterns are env var NAME substrings that indicate a sensitive value.
+// Matched case-insensitively; a matching var's value is replaced with "[REDACTED]".
 var secretPatterns = []string{
 	"token", "secret", "password", "passwd", "pwd",
 	"key", "apikey", "api_key", "credential", "auth",
 	"private", "cert", "jwt", "bearer",
+	// Connection strings and DSNs routinely embed credentials even when the name
+	// contains no "password"/"secret" token.
+	"connection", "database_url", "dsn",
 }
 
-// isSensitiveEnvVar returns true if the env var name looks like a secret.
+// secretValuePrefixes are well-known high-entropy secret formats. A value with
+// one of these prefixes is redacted regardless of its variable NAME — this
+// catches a real credential stashed in a benignly-named var (e.g. FOO=ghp_…)
+// that name-based matching alone would leak.
+var secretValuePrefixes = []string{
+	"ghp_", "gho_", "ghu_", "ghs_", "github_pat_", // GitHub tokens / PATs
+	"glpat-",       // GitLab PATs
+	"shpat_",       // Shopify access tokens
+	"AKIA", "ASIA", // AWS access key IDs
+	"xox",                  // Slack tokens (xoxb-/xoxp-/xoxa-…)
+	"xai-",                 // xAI keys
+	"sk-",                  // OpenAI / Anthropic / Stripe secret keys
+	"rk_live_", "rk_test_", // Stripe restricted keys
+	"AIza",       // Google API keys
+	"1//",        // Google OAuth refresh tokens
+	"SG.",        // SendGrid API keys
+	"npm_",       // npm tokens
+	"dop_v1_",    // DigitalOcean tokens
+	"dckr_pat_",  // Docker Hub PATs
+	"-----BEGIN", // PEM private keys / certificates
+	"eyJ",        // JWT (base64 of '{"…')
+}
+
+// isSensitiveEnvVar returns true if the env var NAME looks like a secret.
 func isSensitiveEnvVar(name string) bool {
 	lower := strings.ToLower(name)
 	for _, pattern := range secretPatterns {
 		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeSecretValue returns true if the VALUE carries a well-known secret
+// prefix, so a credential in a benignly-named variable is still redacted.
+func looksLikeSecretValue(v string) bool {
+	t := strings.TrimSpace(v)
+	for _, p := range secretValuePrefixes {
+		if strings.HasPrefix(t, p) {
 			return true
 		}
 	}
@@ -56,6 +94,11 @@ func ListProcesses() (string, error) {
 		if ppid, err := p.Ppid(); err == nil {
 			info.PPID = ppid
 		}
+		// CPUPercent from a single call is the process's cumulative average since it
+		// started (total CPU time ÷ wall-clock age), NOT an instantaneous load
+		// sample — surfaced as such in the list_processes schema so the model does
+		// not read it as "current" CPU. An instantaneous figure would need two
+		// samples spaced by an interval per process, too costly for a full listing.
 		if cpu, err := p.CPUPercent(); err == nil {
 			info.CPUPercent = cpu
 		}
@@ -139,7 +182,7 @@ func GetProcessDetail(pid int) (string, error) {
 				continue
 			}
 			k, v := kv[:idx], kv[idx+1:]
-			if isSensitiveEnvVar(k) {
+			if isSensitiveEnvVar(k) || looksLikeSecretValue(v) {
 				detail.Environ[k] = "[REDACTED]"
 			} else {
 				detail.Environ[k] = v

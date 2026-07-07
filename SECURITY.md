@@ -147,6 +147,11 @@ Release binaries are published only through the automated release pipeline. Each
 
 ## Changelog
 
-| Date | Change |
-|---|---|
-| 2026-04-01 | Initial public release. Added prompt injection mitigations, config validation, PID range checks, and this security policy. |
+| Date | Version | Change |
+|---|---|---|
+| 2026-07-03 | v2.1.2 | `config.json` locked to Administrators + SYSTEM via `icacls`; legacy `PROCEXP_PATH` env var removed; VirusTotal rate-token refunded on upstream outage. |
+| 2026-07-03 | v2.1.1 | Detection-logic correctness fixes (signing verdicts, system-masquerade, unsigned-process bypass); tool failures returned as `isError` results, not JSON-RPC transport errors. |
+| 2026-07-03 | v2.1.0 | First signed public release: bounded exec timeouts on every shell-out, cosign-keyless `SHA256SUMS` + CycloneDX SBOM, `%ProgramFiles%` admin-only install, hex-validated VirusTotal URLs, race-free VT cache. |
+| 2026-04-01 | v2.0.0 | Prompt-injection output sanitisation, config validation, PID/since bounds, `sysmon_log` allowlist, append-only audit log, and this security policy. |
+
+Full per-release detail: [CHANGELOG.md](CHANGELOG.md).

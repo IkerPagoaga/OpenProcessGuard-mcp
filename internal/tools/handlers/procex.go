@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"processguard-mcp/internal/config"
 	"processguard-mcp/internal/run"
@@ -38,7 +40,7 @@ type UnsignedProcess struct {
 // derive signing status directly from Windows via Get-AuthenticodeSignature,
 // which is headless, reliable, and needs no external Sysinternals binary.
 func GetProcessTree(cfg *config.Config) (string, error) {
-	procs, err := collectProcessesWithSigning()
+	procs, err := collectProcessesWithSigning(run.DefaultTimeout)
 	if err != nil {
 		return "", err
 	}
@@ -54,7 +56,7 @@ func GetProcessTree(cfg *config.Config) (string, error) {
 // GetUnsignedProcesses returns processes whose Authenticode signature is absent
 // or untrusted — a primary malware indicator when found in system paths.
 func GetUnsignedProcesses(cfg *config.Config) (string, error) {
-	procs, err := collectProcessesWithSigning()
+	procs, err := collectProcessesWithSigning(run.DefaultTimeout)
 	if err != nil {
 		return "", err
 	}
@@ -131,7 +133,7 @@ func classifyUnsigned(status string) (list bool, reason string) {
 // collectProcessesWithSigning enumerates processes via Win32_Process and resolves
 // each executable's Authenticode signature (cached per unique path to avoid
 // re-verifying the same binary). Runs under the central runner's timeout.
-func collectProcessesWithSigning() ([]procRow, error) {
+func collectProcessesWithSigning(timeout time.Duration) ([]procRow, error) {
 	const psCmd = `
 $ErrorActionPreference = 'SilentlyContinue'
 $sigCache = @{}
@@ -159,7 +161,7 @@ Get-CimInstance Win32_Process | ForEach-Object {
     }
 } | ConvertTo-Json -Depth 2 -Compress`
 
-	out, err := run.PowerShell(psCmd)
+	out, err := run.PowerShellCtx(context.Background(), timeout, psCmd)
 	if err != nil {
 		return nil, fmt.Errorf("process signing enumeration failed: %w", err)
 	}
