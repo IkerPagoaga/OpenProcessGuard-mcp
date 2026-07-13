@@ -68,7 +68,7 @@ const sysmonChannelMissingMarker = "SYSMON_CHANNEL_MISSING"
 // ErrSysmonChannelMissing reports that the configured Sysmon event-log channel
 // does not exist (or is not accessible) — i.e. Sysmon is not installed on this
 // machine. Callers use errors.Is to distinguish this from a query failure.
-var ErrSysmonChannelMissing = errors.New("Sysmon event log channel not found — is Sysmon installed?")
+var ErrSysmonChannelMissing = errors.New("sysmon event log channel not found — is Sysmon installed?")
 
 // sysmonQueryFailedMarker is emitted when the channel EXISTS (the probe passed)
 // but reading events from it failed — typically access-denied on a non-elevated
@@ -81,7 +81,7 @@ const sysmonQueryFailedMarker = "SYSMON_QUERY_FAILED"
 // ErrSysmonQueryFailed reports a readable-channel query failure (see
 // sysmonQueryFailedMarker). Distinct from ErrSysmonChannelMissing so callers
 // can say "install Sysmon" vs "run elevated".
-var ErrSysmonQueryFailed = errors.New("Sysmon channel exists but could not be read (access denied? Event Log service down?) — run the MCP host elevated")
+var ErrSysmonQueryFailed = errors.New("sysmon channel exists but could not be read (access denied? Event Log service down?) — run the MCP host elevated")
 
 // sysmonQueryScript builds the PowerShell that fetches Sysmon events for one event ID
 // in the last sinceMinutes. It probes the channel FIRST (Get-WinEvent -ListLog with
