@@ -8,7 +8,7 @@
     admin-only-writable location) and adds an entry to Claude Desktop's
     claude_desktop_config.json. The server runs elevated, so a user-writable install
     dir would let a standard user or malware swap the binary that then runs with
-    Administrator rights — hence Program Files. Must be run from an elevated PowerShell.
+    Administrator rights -- hence Program Files. Must be run from an elevated PowerShell.
     Native Stage-0 tools work immediately with no further configuration.
 
     With -BinaryPath, installs a prebuilt (signed release) binary. Without it, builds
@@ -20,7 +20,7 @@
 .PARAMETER ExpectedSha256
     Expected SHA256 of -BinaryPath (from the release's SHA256SUMS). When supplied, the
     binary is verified before install and a mismatch aborts. Strongly recommended with
-    -BinaryPath — otherwise an unverified, potentially tampered elevated-privilege binary
+    -BinaryPath -- otherwise an unverified, potentially tampered elevated-privilege binary
     is installed.
 
 .EXAMPLE
@@ -94,7 +94,7 @@ if (Test-Path $installConfig) {
     Write-Host "Restricted existing config.json to Administrators + SYSTEM." -ForegroundColor Green
 }
 
-# ── Register with Claude Desktop ────────────────────────────────────────────
+# -- Register with Claude Desktop --------------------------------------------
 $claudeCfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
 $claudeDir = Split-Path -Parent $claudeCfg
 
@@ -119,7 +119,7 @@ else {
     # entries into type-name strings; validate the JSON re-parses before overwriting.
     $json = $cfg | ConvertTo-Json -Depth 32
     try { $null = $json | ConvertFrom-Json } catch {
-        throw "Refusing to write claude_desktop_config.json — re-serialized JSON did not validate: $_"
+        throw "Refusing to write claude_desktop_config.json -- re-serialized JSON did not validate: $_"
     }
     $json | Set-Content -Path $claudeCfg -Encoding UTF8
     Write-Host "Registered 'processguard' in $claudeCfg (backup at $claudeCfg.bak)" -ForegroundColor Green

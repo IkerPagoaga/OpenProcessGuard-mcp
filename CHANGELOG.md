@@ -49,6 +49,13 @@ verified against the code before being acted on).
   A; linking both built a cyclic node graph, and `json.Marshal` fails on cycles,
   killing the whole response. A cycle-breaking ancestry check roots the offending
   node instead (regression-tested).
+- **`install.ps1` failed to PARSE under stock Windows PowerShell 5.1** (shipped
+  broken since v2.2.0; it worked under pwsh 7, which is how it went unnoticed): the
+  script contained UTF-8 em-dashes with no BOM, and 5.1 reads BOM-less files as
+  ANSI — the em-dash's final byte decodes to a smart closing quote (`”`) that
+  terminated a string literal mid-script. The script is now pure ASCII, which
+  parses identically under every PowerShell regardless of encoding heuristics.
+  Found by dogfooding the actual elevated install of this release.
 
 ### Removed
 - **`list_processes.status` field** — gopsutil's `Status` is likewise unimplemented on
