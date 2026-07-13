@@ -31,7 +31,10 @@ secrets.*
 # ── Audit logs ───────────────────────────────────────────────
 *.log
 *.jsonl
-audit/
+# Root-anchored: a runtime audit-log dir only — an unanchored `audit/` also
+# matched the internal/audit SOURCE package and silently ignored new files
+# there (nearly dropped internal/audit/audit_test.go from the repo).
+/audit/
 
 # ── OS & editor noise ────────────────────────────────────────
 Thumbs.db

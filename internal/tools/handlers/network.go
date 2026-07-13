@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -27,8 +28,8 @@ type EnrichedConnection struct {
 
 // GetEstablishedConnections returns only ESTABLISHED TCP connections,
 // enriched with process names and optional GeoIP data.
-func GetEstablishedConnections(cfg *config.Config) (string, error) {
-	all, err := collectConnections(cfg)
+func GetEstablishedConnections(ctx context.Context, cfg *config.Config) (string, error) {
+	all, err := collectConnections(ctx, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -54,8 +55,8 @@ func GetEstablishedConnections(cfg *config.Config) (string, error) {
 // Private-IP filtering is always applied regardless of whether geoip_db is
 // configured.  GeoIP country/city enrichment only happens when geoip_db points
 // to a valid MaxMind mmdb file.
-func GetForeignConnections(cfg *config.Config) (string, error) {
-	all, err := collectConnections(cfg)
+func GetForeignConnections(ctx context.Context, cfg *config.Config) (string, error) {
+	all, err := collectConnections(ctx, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -110,7 +111,7 @@ func GetForeignConnections(cfg *config.Config) (string, error) {
 
 // collectConnections runs netstat and returns all connections enriched with
 // process names. Uses tcpvcon.exe if configured, falls back to netstat.
-func collectConnections(cfg *config.Config) ([]EnrichedConnection, error) {
+func collectConnections(ctx context.Context, cfg *config.Config) ([]EnrichedConnection, error) {
 	pidNames := map[int32]string{}
 	procs, _ := process.Processes()
 	for _, p := range procs {
@@ -124,13 +125,13 @@ func collectConnections(cfg *config.Config) ([]EnrichedConnection, error) {
 		// Fall through to netstat for now.
 	}
 
-	return netstatConnections(pidNames)
+	return netstatConnections(ctx, pidNames)
 }
 
 // netstatConnections runs `netstat -ano` (under a bounded timeout) and maps the
 // parsed rows onto enriched connections with process names.
-func netstatConnections(pidNames map[int32]string) ([]EnrichedConnection, error) {
-	out, err := run.Tool("netstat", "-ano")
+func netstatConnections(ctx context.Context, pidNames map[int32]string) ([]EnrichedConnection, error) {
+	out, err := run.ToolCtx(ctx, run.DefaultTimeout, "netstat", "-ano")
 	if err != nil {
 		return nil, fmt.Errorf("netstat failed: %w", err)
 	}

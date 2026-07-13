@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -49,7 +50,10 @@ type HuntReport struct {
 }
 
 // RunFullHunt orchestrates all five hunting stages and returns a HuntReport.
-func RunFullHunt(cfg *config.Config) (string, error) {
+// A cancelled context (the client pipe died mid-hunt) kills the in-flight
+// stage's child process via the runner and skips every remaining stage — the
+// report has nowhere to go, so the only correct move is to stop spawning work.
+func RunFullHunt(ctx context.Context, cfg *config.Config) (string, error) {
 	start := time.Now()
 	report := HuntReport{
 		ScanTimestamp: start.UTC().Format(time.RFC3339),
@@ -69,8 +73,8 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 	// parsed entries rather than launching a second identical scan per hunt.
 	var autorunEntries []AutorunEntry
 	var autorunErr error
-	if avail.Autoruns {
-		raw, err := GetAutorunsEntries(cfg)
+	if avail.Autoruns && ctx.Err() == nil {
+		raw, err := GetAutorunsEntries(ctx, cfg)
 		if err != nil {
 			autorunErr = err
 		} else if err := json.Unmarshal([]byte(raw), &autorunEntries); err != nil {
@@ -78,20 +82,30 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 		}
 	}
 
-	// ── Stage 1: Process Integrity (heuristics + Authenticode signing) ──
-	findings = append(findings, runStage1(cfg)...)
-
-	// ── Stage 2: Persistence (Autoruns) ───────────────────────────
-	findings = append(findings, runStage2(avail.Autoruns, autorunEntries, autorunErr)...)
-
-	// ── Stage 3: Network Visibility ────────────────────────────────
-	findings = append(findings, runStage3(cfg)...)
-
-	// ── Stage 4: Sysmon Forensics (last 60 min) ───────────────────
-	findings = append(findings, runStage4(cfg)...)
-
-	// ── Stage 5: VirusTotal Hash Escalation ────────────────────────
-	findings = append(findings, runStage5(cfg, avail, autorunEntries)...)
+	// Each stage runs only while the server is still alive to deliver the report.
+	if ctx.Err() == nil {
+		// ── Stage 1: Process Integrity (heuristics + Authenticode signing) ──
+		findings = append(findings, runStage1(ctx, cfg)...)
+	}
+	if ctx.Err() == nil {
+		// ── Stage 2: Persistence (Autoruns) ───────────────────────────
+		findings = append(findings, runStage2(avail.Autoruns, autorunEntries, autorunErr)...)
+	}
+	if ctx.Err() == nil {
+		// ── Stage 3: Network Visibility ────────────────────────────────
+		findings = append(findings, runStage3(ctx, cfg)...)
+	}
+	if ctx.Err() == nil {
+		// ── Stage 4: Sysmon Forensics (last 60 min) ───────────────────
+		findings = append(findings, runStage4(ctx, cfg)...)
+	}
+	if ctx.Err() == nil {
+		// ── Stage 5: VirusTotal Hash Escalation ────────────────────────
+		findings = append(findings, runStage5(ctx, cfg, avail, autorunEntries)...)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("hunt aborted: %w", err)
+	}
 
 	// Bucket findings by severity
 	report.Findings = findings
@@ -145,7 +159,7 @@ func RunFullHunt(cfg *config.Config) (string, error) {
 // untrusted binary that trips no heuristic (not name-spoofing, not in a temp
 // dir, not Office-spawned) previously produced zero findings in the full hunt,
 // even though the standalone get_unsigned_processes tool would surface it.
-func runStage1(cfg *config.Config) []Finding {
+func runStage1(ctx context.Context, cfg *config.Config) []Finding {
 	var findings []Finding
 
 	// 1a. Heuristic scan — name spoof / wrong path / temp dir / masquerade / parent.
@@ -183,7 +197,7 @@ func runStage1(cfg *config.Config) []Finding {
 	}
 
 	// 1b. Authenticode signing lens.
-	findings = append(findings, runStage1Signing()...)
+	findings = append(findings, runStage1Signing(ctx)...)
 	return findings
 }
 
@@ -199,12 +213,12 @@ func runStage1(cfg *config.Config) []Finding {
 // unreadable path when ProcessGuard runs non-elevated) is UNKNOWN and skipped,
 // mirroring classifyUnsigned — reporting those would bury real findings under a
 // wall of legitimate SYSTEM processes.
-func runStage1Signing() []Finding {
+func runStage1Signing(ctx context.Context) []Finding {
 	// The signing lens gets a tighter budget than the default: a slow whole-system
 	// Authenticode pass (cold-cache revocation on a networked box) then degrades to
 	// a stage-scoped INFO instead of a SCAN_ERROR that would flip the entire hunt
 	// report to PARTIAL — the heuristic half of Stage 1 already ran.
-	procs, err := collectProcessesWithSigning(25 * time.Second)
+	procs, err := collectProcessesWithSigning(ctx, 25*time.Second)
 	if err != nil {
 		return []Finding{{
 			Stage:       1,
@@ -342,10 +356,10 @@ func runStage2(available bool, entries []AutorunEntry, fetchErr error) []Finding
 }
 
 // runStage3 runs foreign connection detection.
-func runStage3(cfg *config.Config) []Finding {
+func runStage3(ctx context.Context, cfg *config.Config) []Finding {
 	var findings []Finding
 
-	raw, err := GetForeignConnections(cfg)
+	raw, err := GetForeignConnections(ctx, cfg)
 	if err != nil {
 		return append(findings, scanError(3, "network", err))
 	}
@@ -374,7 +388,7 @@ func runStage3(cfg *config.Config) []Finding {
 
 // runStage4 queries Sysmon for the last 60 minutes of process creation and
 // network connection events, flagging suspicious spawns and beacon-like patterns.
-func runStage4(cfg *config.Config) []Finding {
+func runStage4(ctx context.Context, cfg *config.Config) []Finding {
 	var findings []Finding
 	if !cfg.Availability().Sysmon {
 		findings = append(findings, Finding{
@@ -389,7 +403,7 @@ func runStage4(cfg *config.Config) []Finding {
 	}
 
 	// ── ID 1: ProcessCreate — suspicious parent-child spawns ────────────
-	rawCreate, err := GetProcessCreateEvents(cfg, 60)
+	rawCreate, err := GetProcessCreateEvents(ctx, cfg, 60)
 	if err != nil {
 		findings = append(findings, scanError(4, "sysmon-processcreate", err))
 	} else {
@@ -422,7 +436,7 @@ func runStage4(cfg *config.Config) []Finding {
 	}
 
 	// ── ID 3: NetworkConnect — detect unusual outbound connections ───────
-	rawNet, err := GetNetworkEvents(cfg, 60)
+	rawNet, err := GetNetworkEvents(ctx, cfg, 60)
 	if err != nil {
 		findings = append(findings, scanError(4, "sysmon-network", err))
 	} else {
@@ -520,7 +534,7 @@ func lowerBase(path string) string {
 // a SHA256. Any entry with VT detections is escalated to CRITICAL. The entries
 // are the ones already fetched once in RunFullHunt (shared with Stage 2).
 // Skipped when vt_api_key is not configured.
-func runStage5(cfg *config.Config, avail config.ToolAvailability, entries []AutorunEntry) []Finding {
+func runStage5(ctx context.Context, cfg *config.Config, avail config.ToolAvailability, entries []AutorunEntry) []Finding {
 	var findings []Finding
 	if !avail.VirusTotal {
 		findings = append(findings, Finding{
@@ -546,7 +560,10 @@ func runStage5(cfg *config.Config, avail config.ToolAvailability, entries []Auto
 			break
 		}
 		checked++
-		vtRaw, err := LookupHash(cfg, e.SHA256)
+		if ctx.Err() != nil {
+			break // server shutting down — stop consuming VT quota
+		}
+		vtRaw, err := LookupHash(ctx, cfg, e.SHA256)
 		if err != nil {
 			continue
 		}

@@ -43,8 +43,10 @@ func Init() error {
 	if err != nil {
 		return fmt.Errorf("audit: failed to open log file: %w", err)
 	}
+	mu.Lock()
 	logFile = f
 	enabled = true
+	mu.Unlock()
 	return nil
 }
 
@@ -52,9 +54,6 @@ func Init() error {
 // If audit is not enabled or write fails, the error is silently discarded
 // (audit failures must never break the MCP server).
 func Log(tool string, args map[string]any, dur time.Duration, callErr error) {
-	if !enabled || logFile == nil {
-		return
-	}
 	entry := Entry{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Tool:      tool,
@@ -68,8 +67,16 @@ func Log(tool string, args map[string]any, dur time.Duration, callErr error) {
 	if err != nil {
 		return
 	}
+	// The enabled/logFile check lives INSIDE the lock: Close() sets logFile = nil
+	// under mu, so an unguarded fast-path read would race with it the moment any
+	// future refactor closes the log while requests are still in flight. Today
+	// serve() drains every goroutine before Close runs, but Log must stay correct
+	// under any calling pattern, not just the current one.
 	mu.Lock()
 	defer mu.Unlock()
+	if !enabled || logFile == nil {
+		return
+	}
 	logFile.Write(append(data, '\n'))
 }
 

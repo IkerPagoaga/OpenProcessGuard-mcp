@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -59,7 +60,7 @@ func signingFromSigner(signer string) (verified, microsoft bool) {
 
 // GetAutorunsEntries runs autorunsc.exe and returns all persistence entries.
 // Returns an error if autoruns_path is not configured.
-func GetAutorunsEntries(cfg *config.Config) (string, error) {
+func GetAutorunsEntries(ctx context.Context, cfg *config.Config) (string, error) {
 	if cfg.AutorunsPath == "" {
 		return "", fmt.Errorf("autoruns_path not configured — add autorunsc.exe path to config.json")
 	}
@@ -76,7 +77,7 @@ func GetAutorunsEntries(cfg *config.Config) (string, error) {
 		args = append(args, "-v")
 	}
 
-	out, err := run.Tool(cfg.AutorunsPath, args...)
+	out, err := run.ToolCtx(ctx, run.DefaultTimeout, cfg.AutorunsPath, args...)
 	if err != nil {
 		return "", fmt.Errorf("autorunsc failed: %w", err)
 	}
@@ -116,8 +117,8 @@ func GetAutorunsEntries(cfg *config.Config) (string, error) {
 }
 
 // FlagAutorunsAnomalies returns only high-risk entries (unsigned, temp path, VT hits).
-func FlagAutorunsAnomalies(cfg *config.Config) (string, error) {
-	raw, err := GetAutorunsEntries(cfg)
+func FlagAutorunsAnomalies(ctx context.Context, cfg *config.Config) (string, error) {
+	raw, err := GetAutorunsEntries(ctx, cfg)
 	if err != nil {
 		return "", err
 	}

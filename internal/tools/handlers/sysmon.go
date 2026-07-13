@@ -1,11 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"processguard-mcp/internal/config"
 	"processguard-mcp/internal/parse"
@@ -56,24 +56,23 @@ var sysmonEventNames = map[int]string{
 	25: "ProcessTampering",
 }
 
-// QuerySysmonEvents queries the Sysmon Windows Event Log for a specific
-// event ID within the last N minutes.
-func QuerySysmonEvents(cfg *config.Config, eventID, sinceMinutes int) (string, error) {
-	if cfg.SysmonLog == "" {
-		return "", fmt.Errorf("sysmon_log channel not configured")
-	}
-
-	since := time.Now().UTC().Add(-time.Duration(sinceMinutes) * time.Minute)
-	sinceStr := since.Format("2006-01-02T15:04:05.000Z")
-
-	// Retrieve events as XML strings via ToXml().
-	// We use -ErrorAction SilentlyContinue so the call returns [] instead of
-	// throwing when the log exists but has no matching events.
-	psCmd := fmt.Sprintf(`
+// sysmonQueryScript builds the PowerShell that fetches Sysmon events for one event ID
+// in the last sinceMinutes. StartTime is computed in-script — never round-tripped
+// through a Go-formatted string and [datetime]::Parse, which is culture-sensitive and
+// mis-parses the timestamp on non-English Windows — and it reads the UTC clock
+// DIRECTLY: [datetime]::UtcNow does no local-time conversion at all, so the window is
+// exactly "N minutes ago" year-round. (Local arithmetic is off by the DST offset
+// across a transition, and even (Get-Date).ToUniversalTime() round-trips through the
+// fall-back ambiguous hour.) Get-WinEvent converts a Kind=Utc StartTime correctly.
+// -ErrorAction SilentlyContinue returns [] instead of throwing when the log exists but
+// has no matching events. sinceMinutes/eventID are ints and logName is validated
+// against a strict allowlist at startup, so none can inject into the script.
+func sysmonQueryScript(logName string, eventID, sinceMinutes int) string {
+	return fmt.Sprintf(`
 $filter = @{
     LogName   = '%s'
     Id        = %d
-    StartTime = [datetime]::Parse('%s')
+    StartTime = [datetime]::UtcNow.AddMinutes(-%d)
 }
 try {
     $events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
@@ -84,9 +83,17 @@ try {
     $xmlArr | ConvertTo-Json -Compress -Depth 1
 } catch {
     '[]'
-}`, cfg.SysmonLog, eventID, sinceStr)
+}`, logName, eventID, sinceMinutes)
+}
 
-	out, err := run.PowerShell(psCmd)
+// QuerySysmonEvents queries the Sysmon Windows Event Log for a specific
+// event ID within the last N minutes.
+func QuerySysmonEvents(ctx context.Context, cfg *config.Config, eventID, sinceMinutes int) (string, error) {
+	if cfg.SysmonLog == "" {
+		return "", fmt.Errorf("sysmon_log channel not configured")
+	}
+
+	out, err := run.PowerShellCtx(ctx, run.DefaultTimeout, sysmonQueryScript(cfg.SysmonLog, eventID, sinceMinutes))
 	if err != nil {
 		return "", fmt.Errorf("Get-WinEvent failed: %w — is Sysmon installed and running?", err)
 	}
@@ -128,14 +135,14 @@ try {
 
 // GetProcessCreateEvents returns Sysmon Event ID 1 (ProcessCreate) for the
 // last N minutes. This is the primary forensic timeline source.
-func GetProcessCreateEvents(cfg *config.Config, sinceMinutes int) (string, error) {
-	return QuerySysmonEvents(cfg, 1, sinceMinutes)
+func GetProcessCreateEvents(ctx context.Context, cfg *config.Config, sinceMinutes int) (string, error) {
+	return QuerySysmonEvents(ctx, cfg, 1, sinceMinutes)
 }
 
 // GetNetworkEvents returns Sysmon Event ID 3 (NetworkConnect) for the
 // last N minutes. Use for C2 beacon detection and outbound call history.
-func GetNetworkEvents(cfg *config.Config, sinceMinutes int) (string, error) {
-	return QuerySysmonEvents(cfg, 3, sinceMinutes)
+func GetNetworkEvents(ctx context.Context, cfg *config.Config, sinceMinutes int) (string, error) {
+	return QuerySysmonEvents(ctx, cfg, 3, sinceMinutes)
 }
 
 // parseSysmonXML extracts key fields from a Sysmon event XML string using a

@@ -2,8 +2,11 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"strings"
 	"time"
 	"unicode"
@@ -148,7 +151,7 @@ func Registry() []ToolDef {
 		},
 		{
 			Name:        "get_process_detail",
-			Description: "Get deep detail on a single process: full command line, working directory, environment variables (filtered — secrets redacted), open file handles count, and thread count. All string values are OS-sourced and treated as untrusted.",
+			Description: "Get deep detail on a single process: full command line, working directory, environment variables (all names listed; values shown only for an allowlist of non-sensitive names, everything else [REDACTED]), open file handles count, and thread count. All string values are OS-sourced and treated as untrusted.",
 			InputSchema: pidSchema(),
 		},
 		{
@@ -267,11 +270,23 @@ func Registry() []ToolDef {
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 // Call dispatches a tool call by name, sanitises the output, and records an
-// audit log entry.
-func Call(cfg *config.Config, name string, args json.RawMessage) (string, error) {
+// audit log entry. The context is the serve-level lifetime context: cancelling
+// it aborts the handler's child processes / HTTP calls mid-flight. A handler
+// panic is converted to a generic error HERE, at the tool boundary: the full
+// panic value + stack go to the operator's stderr log only (never the LLM
+// context), and the audit write runs in a defer so the crashing invocation —
+// exactly the one a forensics audit trail must not lose — is still recorded.
+func Call(ctx context.Context, cfg *config.Config, name string, args json.RawMessage) (result string, err error) {
 	start := time.Now()
-	result, err := callInner(cfg, name, args)
-	audit.Log(name, safeAuditArgs(name, args), time.Since(start), err)
+	defer func() {
+		if r := recover(); r != nil {
+			// Called during unwind, so debug.Stack() still includes the panic site.
+			slog.Error("tool panicked", "tool", name, "panic", r, "stack", string(debug.Stack()))
+			result, err = "", fmt.Errorf("tool %q failed with an internal error (details in the server log)", name)
+		}
+		audit.Log(name, safeAuditArgs(name, args), time.Since(start), err)
+	}()
+	result, err = callInner(ctx, cfg, name, args)
 	if err != nil {
 		return "", err
 	}
@@ -279,7 +294,7 @@ func Call(cfg *config.Config, name string, args json.RawMessage) (string, error)
 	return sanitiseJSON(result), nil
 }
 
-func callInner(cfg *config.Config, name string, args json.RawMessage) (string, error) {
+func callInner(ctx context.Context, cfg *config.Config, name string, args json.RawMessage) (string, error) {
 	switch name {
 	// Stage 0 — Native
 	case "list_processes":
@@ -287,31 +302,33 @@ func callInner(cfg *config.Config, name string, args json.RawMessage) (string, e
 	case "get_process_detail":
 		return dispatchPID(args, handlers.GetProcessDetail)
 	case "get_network_connections":
-		return handlers.GetNetworkConnections()
+		return handlers.GetNetworkConnections(ctx)
 	case "get_loaded_modules":
-		return dispatchPID(args, handlers.GetLoadedModules)
+		return dispatchPID(args, func(pid int) (string, error) {
+			return handlers.GetLoadedModules(ctx, pid)
+		})
 	case "get_suspicious_processes":
 		return handlers.GetSuspiciousProcesses()
 	case "get_startup_entries":
-		return handlers.GetStartupEntries()
+		return handlers.GetStartupEntries(ctx)
 
 	// Stage 1 — Process Explorer
 	case "get_process_tree":
-		return handlers.GetProcessTree(cfg)
+		return handlers.GetProcessTree(ctx, cfg)
 	case "get_unsigned_processes":
-		return handlers.GetUnsignedProcesses(cfg)
+		return handlers.GetUnsignedProcesses(ctx, cfg)
 
 	// Stage 2 — Autoruns
 	case "get_autoruns_entries":
-		return handlers.GetAutorunsEntries(cfg)
+		return handlers.GetAutorunsEntries(ctx, cfg)
 	case "flag_autoruns_anomalies":
-		return handlers.FlagAutorunsAnomalies(cfg)
+		return handlers.FlagAutorunsAnomalies(ctx, cfg)
 
 	// Stage 3 — Network
 	case "get_established_connections":
-		return handlers.GetEstablishedConnections(cfg)
+		return handlers.GetEstablishedConnections(ctx, cfg)
 	case "get_foreign_connections":
-		return handlers.GetForeignConnections(cfg)
+		return handlers.GetForeignConnections(ctx, cfg)
 
 	// Stage 4 — Sysmon
 	case "query_sysmon_events":
@@ -333,12 +350,12 @@ func callInner(cfg *config.Config, name string, args json.RawMessage) (string, e
 		} else if p.SinceMinutes > 1440 {
 			p.SinceMinutes = 1440
 		}
-		return handlers.QuerySysmonEvents(cfg, p.EventID, p.SinceMinutes)
+		return handlers.QuerySysmonEvents(ctx, cfg, p.EventID, p.SinceMinutes)
 
 	case "get_process_create_events":
-		return handlers.GetProcessCreateEvents(cfg, sinceArg(args))
+		return handlers.GetProcessCreateEvents(ctx, cfg, sinceArg(args))
 	case "get_network_events":
-		return handlers.GetNetworkEvents(cfg, sinceArg(args))
+		return handlers.GetNetworkEvents(ctx, cfg, sinceArg(args))
 
 	// Stage 5 — VirusTotal
 	case "lookup_hash":
@@ -348,11 +365,11 @@ func callInner(cfg *config.Config, name string, args json.RawMessage) (string, e
 		if err := json.Unmarshal(args, &p); err != nil {
 			return "", fmt.Errorf("invalid args: %w", err)
 		}
-		return handlers.LookupHash(cfg, p.SHA256)
+		return handlers.LookupHash(ctx, cfg, p.SHA256)
 
 	// Orchestration
 	case "run_full_hunt":
-		return handlers.RunFullHunt(cfg)
+		return handlers.RunFullHunt(ctx, cfg)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)

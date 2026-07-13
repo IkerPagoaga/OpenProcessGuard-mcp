@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,8 +60,10 @@ var vtRateLimiter = newTokenBucket(4, 60*time.Second)
 
 // LookupHash queries VirusTotal for a SHA256 hash. Returns a fresh cached result
 // when available, coalesces concurrent identical lookups, and NEVER exposes the
-// API key in the returned data.
-func LookupHash(cfg *config.Config, sha256 string) (string, error) {
+// API key in the returned data. The context aborts the upstream HTTP call when
+// the server is shutting down (all requests share the serve-level context, so a
+// follower waiting on the in-flight leader unblocks when the leader aborts).
+func LookupHash(ctx context.Context, cfg *config.Config, sha256 string) (string, error) {
 	if cfg.VTAPIKey == "" {
 		return "", fmt.Errorf("vt_api_key not configured — add your free VirusTotal API key to config.json")
 	}
@@ -70,12 +73,21 @@ func LookupHash(cfg *config.Config, sha256 string) (string, error) {
 	}
 
 	vtCacheMu.Lock()
-	// Fresh cache hit.
-	if entry, ok := vtCache[sha256]; ok && time.Since(entry.cachedAt) < vtCacheTTL {
-		vtCacheMu.Unlock()
-		return marshalReport(entry.report)
+	// Fresh cache hit; an entry found past its TTL is evicted on sight so a
+	// re-looked-up stale hash does not linger (evict-on-expired-read).
+	if entry, ok := vtCache[sha256]; ok {
+		if time.Since(entry.cachedAt) < vtCacheTTL {
+			vtCacheMu.Unlock()
+			return marshalReport(entry.report)
+		}
+		delete(vtCache, sha256)
 	}
-	// A lookup for this hash is already in flight — join it.
+	// A lookup for this hash is already in flight — join it and share its result.
+	// This is safe because ALL callers share the one serve-lifetime context: if the
+	// leader's fetch is cancelled, this follower's context is the same one and is
+	// also cancelled, so inheriting the leader's cancellation error is correct. (If
+	// per-request contexts are ever introduced, a follower with a still-live request
+	// would need to re-lead rather than inherit the leader's cancellation.)
 	if call, ok := vtInflight[sha256]; ok {
 		vtCacheMu.Unlock()
 		call.wg.Wait()
@@ -106,10 +118,14 @@ func LookupHash(cfg *config.Config, sha256 string) (string, error) {
 				err = fmt.Errorf("VirusTotal lookup panicked: %v", r)
 			}
 		}()
-		report, reached, err = fetchVTReport(cfg.VTAPIKey, sha256)
+		report, reached, err = fetchVTReport(ctx, cfg.VTAPIKey, sha256)
 	}()
 
 	vtCacheMu.Lock()
+	// Bound the cache: sweep aged-out entries on the leader path of a genuine upstream
+	// lookup. Reads gate on the TTL but never freed memory, so a long-lived server that
+	// looked up many one-shot hashes grew vtCache without limit — this reclaims them.
+	evictExpiredLocked(time.Now())
 	if err == nil {
 		vtCache[sha256] = vtCacheEntry{report: report, cachedAt: time.Now()}
 	}
@@ -136,16 +152,30 @@ func marshalReport(r VTReport) (string, error) {
 	return string(out), err
 }
 
+// evictExpiredLocked removes every cache entry at or past its TTL and returns the
+// number dropped. The caller MUST hold vtCacheMu. Together with evict-on-expired-read
+// this bounds vtCache instead of letting it grow for the life of the process.
+func evictExpiredLocked(now time.Time) int {
+	removed := 0
+	for h, e := range vtCache {
+		if now.Sub(e.cachedAt) >= vtCacheTTL {
+			delete(vtCache, h)
+			removed++
+		}
+	}
+	return removed
+}
+
 // fetchVTReport makes the actual VirusTotal API v3 call. The bool return reports
 // whether the request actually REACHED VirusTotal (i.e. produced an HTTP response):
 // a transport failure that never reached the upstream should not consume the
 // caller's per-minute rate budget, whereas an HTTP error response DID consume real
 // VT quota and must count.
-func fetchVTReport(apiKey, sha256 string) (VTReport, bool, error) {
+func fetchVTReport(ctx context.Context, apiKey, sha256 string) (VTReport, bool, error) {
 	report := VTReport{Hash: sha256}
 
 	url := "https://www.virustotal.com/api/v3/files/" + sha256
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return report, false, fmt.Errorf("VT request build failed: %w", err)
 	}

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -67,6 +68,55 @@ func looksLikeSecretValue(v string) bool {
 	return false
 }
 
+// envValueAllowlist is the curated set of environment-variable NAMES whose VALUES
+// are non-sensitive and safe to surface. get_process_detail uses a default-DENY
+// (allowlist) model: a variable's value is shown ONLY if its name is in this set, so a
+// credential in an unrecognised, benignly-named variable can never leak into the
+// model's context regardless of the value's format. The variable NAME is always
+// listed either way — a suspicious name is itself forensic signal; only the VALUE is
+// gated. Names are matched case-insensitively.
+var envValueAllowlist = map[string]bool{
+	// OS / hardware identity
+	"os": true, "systemroot": true, "systemdrive": true, "windir": true,
+	"comspec": true, "pathext": true, "driverdata": true,
+	"number_of_processors": true, "processor_architecture": true,
+	"processor_architew6432": true, "processor_identifier": true,
+	"processor_level": true, "processor_revision": true, "computername": true,
+	// Well-known program / data locations (paths, not secrets)
+	"path": true, "programfiles": true, "programfiles(x86)": true,
+	"programw6432": true, "programdata": true, "commonprogramfiles": true,
+	"commonprogramfiles(x86)": true, "commonprogramw6432": true,
+	"public": true, "allusersprofile": true,
+	// Per-user locations (embed the username, not a secret — forensically useful)
+	"userprofile": true, "homedrive": true, "homepath": true,
+	"appdata": true, "localappdata": true, "temp": true, "tmp": true,
+	"username": true,
+	// Session / locale / shell (low-sensitivity)
+	"sessionname": true,
+	"lang":        true, "lc_all": true, "tz": true, "term": true,
+	// Deliberately NOT allowlisted: LOGONSERVER (domain-controller UNC),
+	// USERDOMAIN / USERDOMAIN_ROAMINGPROFILE (AD domain) — surfacing these values
+	// hands an LLM transcript a ready-made lateral-movement recon set. PROMPT is
+	// arbitrary, freely-writable, zero-triage-value. Their NAMES still appear; only
+	// the values are withheld.
+}
+
+// isAllowlistedEnvVar reports whether an env var's VALUE is safe to surface.
+func isAllowlistedEnvVar(name string) bool {
+	return envValueAllowlist[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// redactedEnvValue applies the default-deny allowlist model: it returns the real
+// value only for an allowlisted variable that ALSO clears the secret-name and
+// secret-value checks (defense in depth against a sensitive value placed in an
+// otherwise-safe name), and "[REDACTED]" for everything else.
+func redactedEnvValue(name, value string) string {
+	if isAllowlistedEnvVar(name) && !isSensitiveEnvVar(name) && !looksLikeSecretValue(value) {
+		return value
+	}
+	return "[REDACTED]"
+}
+
 type ProcessInfo struct {
 	PID        int32   `json:"pid"`
 	Name       string  `json:"name"`
@@ -126,7 +176,8 @@ func ListProcesses() (string, error) {
 }
 
 // ProcessDetail is the rich view of a single process returned by get_process_detail.
-// Environment variables are included but sensitive values are redacted.
+// Environment variable names are all listed, but values are surfaced under a
+// default-deny allowlist — only curated non-sensitive names reveal their value.
 type ProcessDetail struct {
 	PID         int32             `json:"pid"`
 	Name        string            `json:"name"`
@@ -137,7 +188,7 @@ type ProcessDetail struct {
 	ThreadCount int32             `json:"thread_count"`
 	NumFDs      int32             `json:"open_handles"`
 	CreateTime  int64             `json:"create_time_unix"`
-	Environ     map[string]string `json:"environ,omitempty"` // sensitive values replaced with [REDACTED]
+	Environ     map[string]string `json:"environ,omitempty"` // non-allowlisted values replaced with [REDACTED]
 }
 
 func GetProcessDetail(pid int) (string, error) {
@@ -173,7 +224,10 @@ func GetProcessDetail(pid int) (string, error) {
 		detail.CreateTime = ct
 	}
 
-	// Collect env vars with sensitive values redacted
+	// Collect env vars. Values are surfaced under a default-deny allowlist
+	// (redactedEnvValue): every variable NAME is listed, but only allowlisted-safe
+	// names reveal their VALUE — so an unknown-format secret in an unrecognised
+	// variable cannot leak into the model's context.
 	if envs, err := p.Environ(); err == nil && len(envs) > 0 {
 		detail.Environ = make(map[string]string, len(envs))
 		for _, kv := range envs {
@@ -182,11 +236,7 @@ func GetProcessDetail(pid int) (string, error) {
 				continue
 			}
 			k, v := kv[:idx], kv[idx+1:]
-			if isSensitiveEnvVar(k) || looksLikeSecretValue(v) {
-				detail.Environ[k] = "[REDACTED]"
-			} else {
-				detail.Environ[k] = v
-			}
+			detail.Environ[k] = redactedEnvValue(k, v)
 		}
 	}
 
@@ -208,7 +258,7 @@ type NetworkConn struct {
 }
 
 // GetNetworkConnections returns all active TCP/UDP connections with PID and process name.
-func GetNetworkConnections() (string, error) {
+func GetNetworkConnections(ctx context.Context) (string, error) {
 	// Build PID → name map
 	pidNames := map[int32]string{}
 	procs, _ := process.Processes()
@@ -218,7 +268,7 @@ func GetNetworkConnections() (string, error) {
 		}
 	}
 
-	out, err := run.Tool("netstat", "-ano")
+	out, err := run.ToolCtx(ctx, run.DefaultTimeout, "netstat", "-ano")
 	if err != nil {
 		return "", fmt.Errorf("netstat failed: %w", err)
 	}

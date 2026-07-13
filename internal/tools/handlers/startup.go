@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -18,7 +19,7 @@ type StartupEntry struct {
 
 // GetStartupEntries returns programs configured to run at startup via
 // registry Run/RunOnce keys and common startup folders (user + all-users).
-func GetStartupEntries() (string, error) {
+func GetStartupEntries(ctx context.Context) (string, error) {
 	var entries []StartupEntry
 
 	// ── Registry Run / RunOnce keys ──────────────────────────────────────
@@ -36,7 +37,7 @@ func GetStartupEntries() (string, error) {
 	}
 
 	for _, regPath := range regPaths {
-		out, err := run.Tool("reg", "query", regPath)
+		out, err := run.ToolCtx(ctx, run.DefaultTimeout, "reg", "query", regPath)
 		if err != nil {
 			// Key doesn't exist — not an error
 			continue
@@ -88,7 +89,7 @@ foreach ($folder in $folders) {
 if ($results.Count -eq 0) { '[]'; exit }
 $results | ConvertTo-Json -Compress -Depth 2`
 
-	psOut, err := run.PowerShell(psCmd)
+	psOut, err := run.PowerShellCtx(ctx, run.DefaultTimeout, psCmd)
 	if err == nil {
 		raw := strings.TrimSpace(string(psOut))
 		if raw != "" && raw != "[]" && raw != "null" {

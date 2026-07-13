@@ -44,3 +44,40 @@ func TestLooksLikeSecretValue(t *testing.T) {
 		}
 	}
 }
+
+// TestRedactedEnvValue locks the default-deny allowlist model that get_process_detail
+// applies to env values: only an allowlisted, non-secret-named, non-secret-valued
+// variable reveals its value; everything else — including an unknown-format secret in
+// an unrecognised, benignly-named variable — is redacted.
+func TestRedactedEnvValue(t *testing.T) {
+	const redacted = "[REDACTED]"
+
+	// Allowlisted names surface their value (case-insensitive on the name).
+	shown := map[string]string{
+		"PATH":                   `C:\Windows;C:\Windows\System32`,
+		"OS":                     "Windows_NT",
+		"processor_architecture": "AMD64", // lower-case name still matches
+		"USERNAME":               "iker",
+		"TEMP":                   `C:\Users\iker\AppData\Local\Temp`,
+	}
+	for name, val := range shown {
+		if got := redactedEnvValue(name, val); got != val {
+			t.Errorf("redactedEnvValue(%q, …) = %q, want the value shown", name, got)
+		}
+	}
+
+	// The core leak the allowlist closes: a real secret in an UNRECOGNISED, benign
+	// name with no known prefix — the old denylist would have leaked this.
+	if got := redactedEnvValue("BUILD_CONFIG", "9f8c1a2b3d4e5f60718293a4b5c6d7e8"); got != redacted {
+		t.Errorf("unrecognised var with a high-entropy value leaked: got %q", got)
+	}
+	// Any non-allowlisted name is redacted regardless of how innocuous the value is.
+	if got := redactedEnvValue("SOME_APP_FLAG", "true"); got != redacted {
+		t.Errorf("non-allowlisted var should be redacted, got %q", got)
+	}
+	// Defense in depth: an allowlisted NAME that nonetheless holds a known secret
+	// value (someone stuffs a token into PATH) is still redacted.
+	if got := redactedEnvValue("PATH", "ghp_0123456789abcdef"); got != redacted {
+		t.Errorf("secret value in an allowlisted name should still be redacted, got %q", got)
+	}
+}

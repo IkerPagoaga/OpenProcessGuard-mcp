@@ -12,9 +12,11 @@ ProcessGuard exposes live process telemetry, persistence checks, network analysi
 
 **Open source, fully auditable.** Every line of code is public. No telemetry, no phone-home, no hidden behaviour. If you don't trust it, read it.
 
-**Security by design.** ProcessGuard opens no listening ports. It communicates exclusively over `stdin`/`stdout` with Claude Desktop. OS-sourced strings are stripped of control characters and length-capped before reaching Claude — this defeats terminal-escape and zero-width/bidi tricks but **cannot** neutralise semantic injection, so tool output is treated as evidence, never instructions. Environment variable secrets are redacted. The VirusTotal API key never appears in tool output or logs.
+**Security by design.** ProcessGuard opens no listening ports. It communicates exclusively over `stdin`/`stdout` with Claude Desktop. OS-sourced strings are stripped of control characters and length-capped before reaching Claude — this defeats terminal-escape and zero-width/bidi tricks but **cannot** neutralise semantic injection, so tool output is treated as evidence, never instructions. Environment variable values are surfaced under a default-deny allowlist (only curated non-sensitive names reveal their value). The VirusTotal API key never appears in tool output or logs.
 
 **Read-only.** ProcessGuard observes — it does not modify files, registry keys, network settings, or any system state.
+
+**Responsive under load.** Requests are dispatched concurrently (bounded to 16 in flight), so a multi-minute `run_full_hunt` never blocks a quick `list_processes`; the `initialize` handshake is always answered first. If the client ever disconnects, in-flight tool invocations are cancelled and their child processes killed — an orphaned elevated server never keeps scanning for nobody.
 
 **Free as in freedom.** MIT licensed. Fork it, extend it, contribute back.
 
@@ -98,6 +100,8 @@ Before you start, make sure the following are installed on your Windows machine.
 | Go | 1.22 or newer | https://go.dev/dl/ |
 | Git | Any recent version | https://git-scm.com/download/win |
 | Claude Desktop | Latest | https://claude.ai/download |
+
+> **Go 1.22 is the source-compatibility floor, not the build toolchain.** `go.mod` pins `toolchain go1.25.11` (it resolves several standard-library advisories reachable via the VirusTotal HTTPS client). With the default `GOTOOLCHAIN=auto`, the first build on an older Go transparently downloads `go1.25.11` — which needs network access and will fail behind a strict proxy or offline. In that case install Go 1.25.11+ directly, or set `GOTOOLCHAIN=local` to build with your installed Go (only if it is ≥ 1.25.11).
 
 **Verify Go is installed** — open a terminal (`Win + R` → type `cmd` → Enter) and run:
 
@@ -403,7 +407,7 @@ You should see `Status: Running`.
 | Tool | Description |
 |---|---|
 | `list_processes` | All running processes: PID, name, PPID, CPU%, memory, exe path, user. |
-| `get_process_detail` | Deep single-process view: cmdline, CWD, env vars (secrets redacted), thread count, handle count. |
+| `get_process_detail` | Deep single-process view: cmdline, CWD, env vars (all names listed; values shown only for an allowlist of non-sensitive names, everything else redacted), thread count, handle count. |
 | `get_network_connections` | All TCP/UDP connections via `netstat -ano`, correlated with process names. |
 | `get_loaded_modules` | DLLs/modules loaded by a specific PID. Detects injection and sideloading. |
 | `get_suspicious_processes` | Heuristic scan: name spoofing, wrong-path system processes, hollow process patterns, unsigned binaries in temp dirs, unusual parent-child chains. |
@@ -501,10 +505,10 @@ ProcessGuard collects raw OS data and passes it into Claude's context window. An
 - **String truncation** — string fields are capped before leaving the MCP boundary: 512 characters by default, and 16384 for forensic-evidence fields (command lines, hashes, Sysmon XML) so they aren't cut off (those fields carry a larger injection surface by design).
 - **Control character stripping** — ASCII control characters (< 0x20, DEL) are stripped from all output.
 - **Config validation** — `sysmon_log` is validated against a strict character allowlist at startup to prevent PowerShell injection.
-- **Env var redaction** — `get_process_detail` redacts an env var's value when its NAME matches a secret pattern (`token`, `secret`, `password`, `key`, `credential`, `auth`, `private`, `cert`, `jwt`, `bearer`, or a connection-string / DSN name) OR its VALUE carries a well-known secret prefix (`ghp_`, `AKIA`, `xox…`, `sk-`, `AIza`, PEM, JWT) — so a credential in an oddly-named variable is caught too.
+- **Env var allowlist** — `get_process_detail` lists every env var NAME but reveals a VALUE only for a curated allowlist of non-sensitive names (`PATH`, `OS`, `PROCESSOR_*`, program/data paths, `USERNAME`, `COMPUTERNAME`, locale/shell vars). Every other value is redacted regardless of format, so a credential in an unrecognised, benignly-named variable cannot leak. A secondary denylist (secret-ish names + **known credential prefixes** `ghp_`/`AKIA`/PEM/JWT/…) redacts even allowlisted names as defense in depth — though a no-recognised-prefix secret stuffed into an allowlisted writable var can still slip that backstop. See [LIMITATIONS.md](LIMITATIONS.md) for the residual gaps.
 - **VT API key isolation** — never echoed in any tool response or written to the audit log.
 
-See [SECURITY.md](SECURITY.md) for the full threat model and responsible disclosure process.
+See [LIMITATIONS.md](LIMITATIONS.md) for the honest trust-boundary posture (semantic injection, the env-value allowlist's residual gaps) and [SECURITY.md](SECURITY.md) for the full threat model and responsible disclosure process.
 
 ### Dependency verification
 

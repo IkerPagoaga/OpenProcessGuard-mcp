@@ -69,3 +69,33 @@ func TestToolCtxTimeout(t *testing.T) {
 		t.Errorf("command was not killed at the deadline (took %s)", elapsed)
 	}
 }
+
+// TestToolCtxCancelKillsChild proves the shutdown guarantee behind the dead-pipe
+// path: cancelling the PARENT context (the serve-level lifetime context) kills the
+// child process immediately — a host death mid-hunt stops the elevated children
+// instead of letting them run to their own timeouts for nobody.
+func TestToolCtxCancelKillsChild(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("cancel test shells out to powershell; Windows-only")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := ToolCtx(ctx, 30*time.Second, "powershell",
+		"-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 25")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a cancellation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("error should report the cancellation, got: %v", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("child was not killed on cancel (took %s; its own budget was 30s)", elapsed)
+	}
+}

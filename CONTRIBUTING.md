@@ -21,8 +21,12 @@ make check            # gofmt + vet + test + govulncheck
 - **Put logic in `internal/parse`.** New output parsing belongs in a pure function
   with a table test, not inline in a handler. Handlers should stay thin: run a tool
   via `internal/run`, hand the output to a parser, map to the response type.
-- **All shell-outs go through `internal/run`** so they inherit the timeout. Do not
-  call `os/exec` directly from a handler.
+- **All shell-outs go through `internal/run`** (`ToolCtx` / `PowerShellCtx`) so they
+  inherit both the timeout and the server's lifetime-cancellation context — pass the
+  request `ctx` through, never `context.Background()`. Do not call `os/exec` directly
+  from a handler. One invariant to preserve: on Windows, cancellation kills only the
+  DIRECT child, so a PowerShell `-Command` script must not spawn its own child
+  processes (see the `run.ToolCtx` doc comment).
 - **Never interpolate untrusted input into a PowerShell `-Command` string.** Numeric
   inputs are range-checked; string inputs (e.g. `sysmon_log`) are whitelisted in
   `internal/config`. Preserve that discipline.

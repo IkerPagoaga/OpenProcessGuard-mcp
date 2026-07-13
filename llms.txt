@@ -5,12 +5,12 @@
 ProcessGuard observes the system and reports findings — it never modifies files, the registry, or network state. Optional stages activate only when configured; the native Stage-0 tools work with zero configuration. Signing status is derived directly from Windows via `Get-AuthenticodeSignature` (no external Sysinternals binary required). Releases are hashed (`SHA256SUMS`) and cosign-keyless-signed with an attached CycloneDX SBOM.
 
 ## Architecture
-- [ARCHITECTURE.md](ARCHITECTURE.md): package layering; the two design seams — `internal/run` (one timeout-bounded choke point for every external process) and `internal/parse` (pure, unit-testable output parsers); the prompt-injection output boundary; the request lifecycle.
-- Entry point `main.go` handles JSON-RPC framing + dispatch. The tool registry, dispatcher, and output sanitiser live in `internal/tools/tools.go`. Handlers are one-file-per-tool-group under `internal/tools/handlers/`.
+- [ARCHITECTURE.md](ARCHITECTURE.md): package layering; the two design seams — `internal/run` (one timeout- and cancellation-bounded choke point for every external process) and `internal/parse` (pure, unit-testable output parsers); the prompt-injection output boundary; the request lifecycle.
+- Entry point `main.go` handles JSON-RPC framing + CONCURRENT dispatch (bounded to 16 in flight, stdout writes mutex-serialised, `initialize` answered synchronously-first; a long `run_full_hunt` never blocks a quick call). A dead client pipe cancels the server's lifetime context: in-flight child processes are killed and the server exits. The tool registry, dispatcher, and output sanitiser live in `internal/tools/tools.go`. Handlers are one-file-per-tool-group under `internal/tools/handlers/`.
 
 ## Security
-- [SECURITY.md](SECURITY.md): read-only design, no listening ports, prompt-injection mitigations, VirusTotal API-key handling, private vulnerability disclosure, and release-integrity verification.
-- [LIMITATIONS.md](LIMITATIONS.md): user-mode (ring-3) scope, Windows-only, heuristics-are-candidates-not-verdicts, and the trust boundary (tool output is evidence to read, never instructions to follow).
+- [SECURITY.md](SECURITY.md): read-only design, no listening ports, prompt-injection mitigations (incl. the default-deny env-value allowlist in `get_process_detail`), VirusTotal API-key handling, private vulnerability disclosure, and release-integrity verification.
+- [LIMITATIONS.md](LIMITATIONS.md): user-mode (ring-3) scope, Windows-only, heuristics-are-candidates-not-verdicts, the env-allowlist residual gaps, shutdown semantics (dead client cancels in-flight work; a wedged host is the documented residual), and the trust boundary (tool output is evidence to read, never instructions to follow).
 
 ## Install & verify
 - [README.md](README.md): quick start (`install.ps1` + zero-config first run), per-tool reference, troubleshooting, and how to verify a signed release (`cosign verify-blob` + `sha256sum -c` + SBOM).

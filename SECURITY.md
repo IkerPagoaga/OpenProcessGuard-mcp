@@ -61,7 +61,7 @@ The following mitigations are implemented:
 | **Control character stripping** | ASCII control characters (< 0x20, DEL) are removed from all output, except tab and newline. |
 | **Non-printable Unicode removal** | Non-printable Unicode code points are replaced with `?`. |
 | **Output sanitisation at boundary** | All tool output passes through `sanitiseJSON()` in `tools.go` before it reaches Claude — individual handlers do not need to sanitise. |
-| **Env var redaction** | `get_process_detail` redacts any environment variable whose name matches: `token`, `secret`, `password`, `passwd`, `pwd`, `key`, `apikey`, `api_key`, `credential`, `auth`, `private`, `cert`, `jwt`, `bearer`. |
+| **Env var allowlist** | `get_process_detail` lists every environment-variable NAME but reveals a VALUE only for a curated default-deny allowlist of non-sensitive names (`PATH`, `OS`, `PROCESSOR_*`, program/data paths, `USERNAME`, `COMPUTERNAME`, locale/shell vars). Every other value is redacted regardless of format, so an unknown-format credential in an unrecognised variable cannot leak. A secondary denylist (secret-ish names such as `token`/`secret`/`password`/`jwt` + known credential prefixes `ghp_`/`AKIA`/PEM/JWT) redacts even allowlisted names as defence in depth. Residual gaps are documented in [LIMITATIONS.md](LIMITATIONS.md). |
 | **Config validation** | `sysmon_log` in `config.json` is validated against a strict allowlist regex at startup — only alphanumeric characters, spaces, hyphens, slashes, underscores, and dots are permitted. This prevents PowerShell injection via a crafted config value. |
 
 **Residual risk:** These mitigations reduce the attack surface but cannot eliminate prompt injection entirely. A sophisticated attacker with local code execution could craft payloads that survive sanitisation. The primary defence is running ProcessGuard only on machines you control.
@@ -149,6 +149,8 @@ Release binaries are published only through the automated release pipeline. Each
 
 | Date | Version | Change |
 |---|---|---|
+| 2026-07-13 | v2.3.0 | `get_process_detail` env values moved to a default-deny allowlist; concurrent request dispatch (bounded, write-serialised) with lifetime-context cancellation — a dead client kills in-flight child processes; tool panic details kept to stderr only (generic error to the model) with the panicking call still audit-logged; culture/DST-exact Sysmon window (`[datetime]::UtcNow`); bounded VT cache. |
+| 2026-07-06 | v2.2.0 | Authenticode signing lens wired into `run_full_hunt` Stage 1; system binaries executed by absolute canonical `System32` path (no `%SystemRoot%` trust), closing a PATH-order hijack; env-var redaction extended to value prefixes (`ghp_`, `AKIA`, PEM, JWT) and connection-string/DSN names. |
 | 2026-07-03 | v2.1.2 | `config.json` locked to Administrators + SYSTEM via `icacls`; legacy `PROCEXP_PATH` env var removed; VirusTotal rate-token refunded on upstream outage. |
 | 2026-07-03 | v2.1.1 | Detection-logic correctness fixes (signing verdicts, system-masquerade, unsigned-process bypass); tool failures returned as `isError` results, not JSON-RPC transport errors. |
 | 2026-07-03 | v2.1.0 | First signed public release: bounded exec timeouts on every shell-out, cosign-keyless `SHA256SUMS` + CycloneDX SBOM, `%ProgramFiles%` admin-only install, hex-validated VirusTotal URLs, race-free VT cache. |

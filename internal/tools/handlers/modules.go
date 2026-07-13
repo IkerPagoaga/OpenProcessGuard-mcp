@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -24,11 +25,11 @@ type ModuleInfo struct {
 // GetLoadedModules returns all DLLs and modules loaded by the given process.
 // Primary: PowerShell Get-Process .Modules (richest data).
 // Fallback: tasklist /m (names only, no paths).
-func GetLoadedModules(pid int) (string, error) {
-	modules, err := modulesViaPowerShell(pid)
+func GetLoadedModules(ctx context.Context, pid int) (string, error) {
+	modules, err := modulesViaPowerShell(ctx, pid)
 	if err != nil || len(modules) == 0 {
 		// PowerShell failed (e.g. access denied on system process) — fall back
-		fallback, fbErr := modulesViaTasklist(pid)
+		fallback, fbErr := modulesViaTasklist(ctx, pid)
 		if fbErr != nil {
 			if err != nil {
 				return "", fmt.Errorf("PowerShell modules failed: %w; tasklist fallback also failed: %v", err, fbErr)
@@ -51,7 +52,7 @@ func GetLoadedModules(pid int) (string, error) {
 }
 
 // modulesViaPowerShell uses Get-Process .Modules to get full module details.
-func modulesViaPowerShell(pid int) ([]ModuleInfo, error) {
+func modulesViaPowerShell(ctx context.Context, pid int) ([]ModuleInfo, error) {
 	// Get-Process.Modules gives us ModuleName, FileName, BaseAddress, ModuleMemorySize, FileVersionInfo
 	psCmd := fmt.Sprintf(`
 $p = Get-Process -Id %d -ErrorAction SilentlyContinue
@@ -69,7 +70,7 @@ $mods | ForEach-Object {
     }
 } | ConvertTo-Json -Compress -Depth 2`, pid)
 
-	out, err := run.PowerShell(psCmd)
+	out, err := run.PowerShellCtx(ctx, run.DefaultTimeout, psCmd)
 	if err != nil {
 		return nil, fmt.Errorf("Get-Process modules failed: %w", err)
 	}
@@ -123,8 +124,8 @@ $mods | ForEach-Object {
 
 // modulesViaTasklist uses tasklist /m /fi "PID eq N" as a no-path fallback.
 // Returns ModuleInfo with Name only; Path will be empty.
-func modulesViaTasklist(pid int) ([]ModuleInfo, error) {
-	out, err := run.Tool("tasklist", "/m", "/fi", fmt.Sprintf("PID eq %d", pid))
+func modulesViaTasklist(ctx context.Context, pid int) ([]ModuleInfo, error) {
+	out, err := run.ToolCtx(ctx, run.DefaultTimeout, "tasklist", "/m", "/fi", fmt.Sprintf("PID eq %d", pid))
 	if err != nil {
 		return nil, fmt.Errorf("tasklist /m failed: %w", err)
 	}

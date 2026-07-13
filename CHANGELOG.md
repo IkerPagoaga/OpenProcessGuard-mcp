@@ -6,6 +6,72 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-13
+
+### Changed
+- **Concurrent request dispatch.** The stdio JSON-RPC loop now reads requests serially
+  but dispatches them concurrently (bounded to 16 in flight), so a long `run_full_hunt`
+  no longer blocks a quick `list_processes`. Responses carry their own id and are
+  serialised onto stdout through a write mutex; a panic in any single request can no
+  longer take down the server. Two deliberate exceptions: the `initialize` handshake is
+  answered synchronously (a pipelining client can never observe a `tools/*` reply
+  arriving ahead of the handshake), and a failed stdout write cancels the server's
+  lifetime context — in-flight tool invocations abort with their child processes
+  killed, no new requests are accepted, and the server exits even if the host still
+  holds stdin open — instead of silently dispatching work to a dead client pipe
+  forever.
+- **Every shell-out and the VirusTotal HTTP call now run under the server's lifetime
+  context.** `tools.Call` threads a context through every handler down to
+  `exec.CommandContext` / `http.NewRequestWithContext`, so cancellation (host death)
+  kills children mid-flight instead of letting them run to their own timeouts; a
+  cancelled `run_full_hunt` also skips its remaining stages and stops consuming
+  VirusTotal quota.
+- **`get_process_detail` env-var redaction is now a default-deny allowlist.** Every
+  variable NAME is still listed, but a VALUE is revealed only for a curated set of
+  non-sensitive names (`PATH`, `OS`, `PROCESSOR_*`, program/data paths, locale/shell
+  vars); every other value is redacted regardless of format, so an unknown-format
+  credential in an unrecognised, benignly-named variable can no longer leak into the
+  model context. The prior name/prefix denylist is retained as a secondary check on
+  allowlisted names. See LIMITATIONS.md for the residual gaps.
+
+### Fixed
+- **VirusTotal result cache is now bounded.** Expired entries are evicted on read and
+  swept on the leader path of each upstream lookup, instead of accumulating for the life
+  of the process (reads gated on the 24h TTL but nothing was ever freed).
+- **Audit log's enabled/file check moved inside its mutex.** The unguarded fast-path
+  read could race a concurrent `Close()` under any future teardown refactor (latent
+  today — shutdown drains all in-flight requests first). The audit package also gains
+  its first test: 16 concurrent writers + a Log-vs-Close overlap, asserting every JSONL
+  line lands intact (race-detector-verified).
+- **Sysmon query timestamp is culture-safe and DST-exact.** `query_sysmon_events` /
+  `get_process_create_events` / `get_network_events` compute the lookback window
+  in-script as `[datetime]::UtcNow.AddMinutes(-N)` — a direct UTC clock read — instead
+  of round-tripping a Go-formatted timestamp through `[datetime]::Parse`, which is
+  culture-sensitive and mis-parsed on non-English Windows. Reading UTC directly also
+  makes the window exactly N minutes across every DST transition (local-time
+  arithmetic was off by up to the offset, and even a local→UTC conversion is
+  ambiguous during the fall-back hour).
+
+### Security
+- **Tool panic details no longer reach the model.** A handler panic is converted to a
+  generic error at the tool boundary; the full panic value **and stack trace** go to
+  the operator's stderr log only, so uncontrolled internal state (paths, indexes,
+  partial values) cannot enter the LLM context through a crash message.
+- **Panicking tool calls are still audit-logged.** The audit write now runs in a defer,
+  so the invocation that crashed — exactly the one a forensics audit trail must not
+  lose — is recorded (with a generic panic marker) instead of being skipped by the
+  unwind.
+
+### Added
+- `initialize` `serverInfo` now surfaces `commit` and `buildDate` (injected at release
+  time via `-ldflags`) alongside `version`, so a running server reports its exact build.
+
+### Docs
+- README documents that Go 1.22 is the source-compatibility floor while the build
+  toolchain auto-upgrades to the pinned `go1.25.11` (network-dependent on first build;
+  offline/proxy guidance added). README's prompt-injection section now points at
+  LIMITATIONS.md for the honest trust-boundary posture.
+
 ## [2.2.0] - 2026-07-06
 
 ### Added
