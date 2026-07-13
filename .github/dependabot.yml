@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Keep third-party GitHub Actions current. Because actions are pinned to full
+  # commit SHAs (with a `# vX` comment), Dependabot bumps the SHA and the comment
+  # together, so pinning never means running stale action code.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 5
+
+  # Go module dependencies (govulncheck also gates in CI; this surfaces
+  # non-vuln updates too).
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5

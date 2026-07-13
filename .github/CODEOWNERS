@@ -1,0 +1,4 @@
+# Every change to any path requires review from the maintainer before it can
+# merge. Combined with the branch-protection rule "Require review from Code
+# Owners" on `main`, this makes @IkerPagoaga the sole approver of all PRs.
+* @IkerPagoaga
