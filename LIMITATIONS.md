@@ -23,7 +23,15 @@ Know what it can and cannot do before relying on it.
   `Get-AuthenticodeSignature`; catalog-signed system binaries and revoked/expired
   certificates are reported as the OS sees them.
 - **Optional stages need setup.** Autoruns, Sysmon, VirusTotal, and GeoIP each
-  require configuration; when absent, their stage is skipped, not inferred.
+  require configuration or installation; when absent, their stage is reported
+  `TOOL_UNAVAILABLE`, never silently counted as clean. Sysmon's health is probed
+  live in two layers: a missing Event Log channel reports "not installed"
+  (`TOOL_UNAVAILABLE`), and a channel that exists but cannot be *read* — access
+  denied on a non-elevated host, or the EventLog service down — reports a query
+  failure (`SCAN_ERROR`) instead of masquerading as zero events. One residual
+  ambiguity: a channel whose *registration* is unreadable by the server's token
+  fails the existence probe and is reported as not-installed; the finding and
+  recommendation text both carry the "or run elevated" hedge for that case.
 
 ## Trust boundary
 

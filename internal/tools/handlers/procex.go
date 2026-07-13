@@ -225,6 +225,12 @@ func buildTree(procs []procRow) []*ProcessNode {
 	nodeMap := make(map[int32]*ProcessNode, len(procs))
 	for i := range procs {
 		p := &procs[i]
+		if _, dup := nodeMap[p.PID]; dup {
+			// Defensive: Win32_Process yields one row per PID, but a duplicate
+			// row here would let a later link pass bypass createsCycle's
+			// acyclicity invariant (it assumes unique PIDs). Keep the first.
+			continue
+		}
 		nodeMap[p.PID] = &ProcessNode{
 			PID:         p.PID,
 			Name:        p.Name,
@@ -235,15 +241,43 @@ func buildTree(procs []procRow) []*ProcessNode {
 		}
 	}
 
+	// parentOf records only the links actually made, so createsCycle can walk
+	// ancestry over an always-acyclic map (the walk is guaranteed to terminate).
+	parentOf := make(map[int32]int32, len(procs))
+	linked := make(map[int32]bool, len(procs))
 	var roots []*ProcessNode
 	for i := range procs {
 		p := &procs[i]
-		node := nodeMap[p.PID]
-		if parent, ok := nodeMap[p.PPID]; ok && p.PPID != 0 && p.PPID != p.PID {
-			parent.Children = append(parent.Children, node)
-		} else {
-			roots = append(roots, node)
+		if linked[p.PID] {
+			continue // duplicate PID row — its node was placed by the first row
 		}
+		linked[p.PID] = true
+		node := nodeMap[p.PID]
+		parent, ok := nodeMap[p.PPID]
+		if !ok || p.PPID == 0 || p.PPID == p.PID || createsCycle(parentOf, p.PID, p.PPID) {
+			roots = append(roots, node)
+			continue
+		}
+		parent.Children = append(parent.Children, node)
+		parentOf[p.PID] = p.PPID
 	}
 	return roots
+}
+
+// createsCycle reports whether linking child under parent would close a PPID
+// loop. Windows reuses PIDs, so a snapshot can legitimately claim A's parent is
+// B while B's recorded parent PID was reused by A — linking both would build a
+// cyclic node graph, and json.Marshal fails on cycles, killing the whole
+// get_process_tree response. The offending link is broken by rooting the child.
+func createsCycle(parentOf map[int32]int32, child, parent int32) bool {
+	for cur := parent; ; {
+		if cur == child {
+			return true
+		}
+		next, ok := parentOf[cur]
+		if !ok {
+			return false
+		}
+		cur = next
+	}
 }

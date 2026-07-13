@@ -21,14 +21,14 @@ ProcessGuard MCP is a **read-only** Windows security monitoring tool: it observe
 
 - Reads live OS data: running processes, network connections, loaded modules, startup entries, Sysmon event logs.
 - Calls optional external binaries you configure: `autorunsc.exe` (Sysinternals Autoruns). Process Explorer is no longer used — Stage 1 signing is derived from the built-in `Get-AuthenticodeSignature`.
-- Makes outbound HTTPS requests to VirusTotal only when `vt_api_key` is configured and `lookup_hash` is called.
+- Makes outbound HTTPS requests to VirusTotal only when `vt_api_key` is configured — via its own client when `lookup_hash` / hunt Stage 5 runs, **and via `autorunsc.exe`'s built-in VirusTotal integration whenever the optional Autoruns stage runs with a key configured** (`-v`: autorunsc submits the SHA256 **hashes** of autostart binaries — never file contents — through its own anonymous integration, not your API key).
 - Writes an append-only audit log to `%APPDATA%\ProcessGuard\audit.log`.
 
 ### What ProcessGuard does NOT do
 
 - It opens **no listening ports** of any kind. The MCP server communicates exclusively over `stdin`/`stdout` with Claude Desktop — no TCP socket, no HTTP server, no named pipe exposed externally.
-- ProcessGuard itself makes no registry writes, file modifications, or configuration changes to the monitored system. Two disclosed exceptions: its own append-only audit log, and the `HKCU\Software\Sysinternals\...\EulaAccepted` value written by Microsoft's `autorunsc.exe -accepteula` when you enable the optional Autoruns stage.
-- It does not exfiltrate data. The only outbound network call is VirusTotal HTTPS, and only when you explicitly configure an API key.
+- ProcessGuard itself makes no registry writes, file modifications, or configuration changes to the monitored system. Three disclosed exceptions, all tied to features you opt into: its own append-only audit log; the `HKCU\Software\Sysinternals\...\EulaAccepted` value written by Microsoft's `autorunsc.exe -accepteula` when you enable the optional Autoruns stage; and — when `vt_api_key` is configured — the VirusTotal terms-of-service acceptance that `autorunsc.exe -vt` records under the same `HKCU\Software\Sysinternals` key (persistent: it also covers future manual autorunsc runs by that user). Configuring a VT API key is treated as your VirusTotal opt-in — the key can only be obtained by accepting VirusTotal's terms — and without `-vt` a headless scan on a box that never accepted them stalls on an interactive prompt.
+- It does not exfiltrate data. The only outbound network calls are VirusTotal HTTPS — ProcessGuard's own hash lookups plus autorunsc's hash submissions during the Autoruns stage — and only when you explicitly configure an API key. Hashes only; file contents are never uploaded (`-v` without the `s` upload option).
 - It does not escalate privileges on its own — it runs with whatever rights Claude Desktop was launched with.
 
 ---
@@ -86,7 +86,7 @@ ProcessGuard does **not** open any listening ports. The attack surface is:
 | Interface | Direction | Description |
 |---|---|---|
 | `stdin` / `stdout` | Inbound from Claude Desktop | MCP JSON-RPC 2.0 protocol — local process pipe only |
-| HTTPS to `www.virustotal.com` | Outbound | Only when vt_api_key is configured and lookup_hash is called |
+| HTTPS to `www.virustotal.com` | Outbound | Only when `vt_api_key` is configured: ProcessGuard's own client on `lookup_hash` / hunt Stage 5, plus `autorunsc.exe`'s built-in integration (hash submission, never file contents) during the Autoruns stage |
 | HTTPS to MaxMind (none) | None | GeoIP database is a local file — no network calls |
 
 ---
@@ -149,6 +149,7 @@ Release binaries are published only through the automated release pipeline. Each
 
 | Date | Version | Change |
 |---|---|---|
+| 2026-07-13 | v2.4.0 | Sysmon availability probed live — a Sysmon-less machine reports `TOOL_UNAVAILABLE` instead of a silently clean Stage 4; `autorunsc` invoked with `-vt` (no interactive ToS stall in the headless context); `open_handles` sourced from `GetProcessHandleCount` (lazy-loaded from System32 only) and omitted when unreadable; dead `status` field and `procexp_path`/`tcpview_path`/`internal/procex` scaffolding removed; toolchain `go1.25.12`; manual-install path labeled dev-only against the binary-plant vector. |
 | 2026-07-13 | v2.3.0 | `get_process_detail` env values moved to a default-deny allowlist; concurrent request dispatch (bounded, write-serialised) with lifetime-context cancellation — a dead client kills in-flight child processes; tool panic details kept to stderr only (generic error to the model) with the panicking call still audit-logged; culture/DST-exact Sysmon window (`[datetime]::UtcNow`); bounded VT cache. |
 | 2026-07-06 | v2.2.0 | Authenticode signing lens wired into `run_full_hunt` Stage 1; system binaries executed by absolute canonical `System32` path (no `%SystemRoot%` trust), closing a PATH-order hijack; env-var redaction extended to value prefixes (`ghp_`, `AKIA`, PEM, JWT) and connection-string/DSN names. |
 | 2026-07-03 | v2.1.2 | `config.json` locked to Administrators + SYSTEM via `icacls`; legacy `PROCEXP_PATH` env var removed; VirusTotal rate-token refunded on upstream outage. |

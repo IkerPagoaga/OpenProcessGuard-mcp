@@ -1,9 +1,7 @@
 {
-  "procexp_path":  "",
-  "autoruns_path": "C:\\Tools\\SysinternalsSuite\\autorunsc.exe",
-  "tcpview_path":  "",
+  "autoruns_path": "",
   "sysmon_log":    "Microsoft-Windows-Sysmon/Operational",
   "vt_api_key":    "",
-  "geoip_db":      "C:\\Tools\\GeoIP\\GeoLite2-City.mmdb",
+  "geoip_db":      "",
   "audit_log":     true
 }

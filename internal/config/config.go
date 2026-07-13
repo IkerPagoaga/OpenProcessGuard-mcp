@@ -15,14 +15,17 @@ const configFileName = "config.json"
 // This prevents PowerShell injection via a crafted sysmon_log value.
 var sysmonLogRe = regexp.MustCompile(`^[A-Za-z0-9 \-/_\.]+$`)
 
+// Config is the operator-facing configuration read from config.json.
+// Removed in v2.4.0: procexp_path (Stage 1 signing has come from the built-in
+// Get-AuthenticodeSignature since v2.1.0) and tcpview_path (a never-activated
+// reservation). Old config.json files that still carry those keys keep
+// working — encoding/json ignores unknown fields.
 type Config struct {
-	ProcessExplorerPath string `json:"procexp_path"`
-	AutorunsPath        string `json:"autoruns_path"`
-	TCPViewPath         string `json:"tcpview_path"`
-	SysmonLog           string `json:"sysmon_log"`
-	VTAPIKey            string `json:"vt_api_key"`
-	GeoIPDB             string `json:"geoip_db"`
-	AuditLog            bool   `json:"audit_log"`
+	AutorunsPath string `json:"autoruns_path"`
+	SysmonLog    string `json:"sysmon_log"`
+	VTAPIKey     string `json:"vt_api_key"`
+	GeoIPDB      string `json:"geoip_db"`
+	AuditLog     bool   `json:"audit_log"`
 }
 
 var configDefaults = Config{
@@ -98,23 +101,23 @@ func execDir() (string, error) {
 
 // ToolAvailability reports which hunting stages are available.
 type ToolAvailability struct {
-	ProcessExplorer bool
-	Autoruns        bool
-	TCPView         bool
-	Sysmon          bool
-	VirusTotal      bool
-	GeoIP           bool
+	Autoruns   bool
+	Sysmon     bool
+	VirusTotal bool
+	GeoIP      bool
 }
 
 // Availability checks which optional tools are configured and accessible.
+// Sysmon here means "a channel name is configured" — which is always true,
+// since sysmon_log carries a default. Whether the channel actually EXISTS on
+// this machine is probed live by the Stage-4 query (ErrSysmonChannelMissing);
+// run_full_hunt reports the probed value, not this flag.
 func (c *Config) Availability() ToolAvailability {
 	return ToolAvailability{
-		ProcessExplorer: c.ProcessExplorerPath != "" && fileExists(c.ProcessExplorerPath),
-		Autoruns:        c.AutorunsPath != "" && fileExists(c.AutorunsPath),
-		TCPView:         c.TCPViewPath != "" && fileExists(c.TCPViewPath),
-		Sysmon:          c.SysmonLog != "",
-		VirusTotal:      c.VTAPIKey != "",
-		GeoIP:           c.GeoIPDB != "" && fileExists(c.GeoIPDB),
+		Autoruns:   c.AutorunsPath != "" && fileExists(c.AutorunsPath),
+		Sysmon:     c.SysmonLog != "",
+		VirusTotal: c.VTAPIKey != "",
+		GeoIP:      c.GeoIPDB != "" && fileExists(c.GeoIPDB),
 	}
 }
 

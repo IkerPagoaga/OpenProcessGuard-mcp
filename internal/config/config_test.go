@@ -14,7 +14,7 @@ func TestValidate_SysmonLogWhitelist(t *testing.T) {
 
 func TestAvailability(t *testing.T) {
 	empty := (&Config{}).Availability()
-	if empty.ProcessExplorer || empty.Autoruns || empty.VirusTotal || empty.GeoIP {
+	if empty.Autoruns || empty.VirusTotal || empty.GeoIP {
 		t.Error("empty config should report optional tools unavailable")
 	}
 

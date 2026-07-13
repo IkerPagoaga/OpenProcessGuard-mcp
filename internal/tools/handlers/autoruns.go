@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"processguard-mcp/internal/config"
 	"processguard-mcp/internal/parse"
@@ -38,6 +39,11 @@ type AutorunEntry struct {
 	Reason string   `json:"reason,omitempty"`
 }
 
+// autorunsVTTimeout bounds an autorunsc run that includes per-hash VirusTotal
+// lookups (-v). Larger than run.DefaultTimeout because the lookups are serial
+// network calls, but still a hard ceiling — a hung scan cannot wedge the server.
+const autorunsVTTimeout = 180 * time.Second
+
 // suspiciousAutorunDirs mirrors the process heuristic — autoruns from these
 // paths are almost always malicious or at minimum high-risk.
 var suspiciousAutorunDirs = []string{
@@ -68,16 +74,28 @@ func GetAutorunsEntries(ctx context.Context, cfg *config.Config) (string, error)
 	// -a * : all categories · -c : CSV · -h : hash (SHA256) · -s : verify
 	// signatures · -nobanner : no Sysinternals banner · -accepteula : headless.
 	args := []string{"-a", "*", "-c", "-h", "-s", "-nobanner", "-accepteula"}
+	timeout := run.DefaultTimeout
 	if cfg.VTAPIKey != "" {
 		// -v makes autorunsc submit hashes to VirusTotal via its OWN integration:
 		// it does NOT consume vt_api_key, and those calls are not counted against
 		// this server's per-hunt VT cap. It is enabled here only as a proxy for
 		// "the user has opted into VT"; run_full_hunt's Stage 5 performs the
 		// key-authenticated, rate-capped lookups.
-		args = append(args, "-v")
+		//
+		// -vt accepts the VirusTotal terms of service. Without it, a box where the
+		// ToS was never accepted gets an INTERACTIVE prompt (per Microsoft's autoruns
+		// docs) — which in this headless context means a silent stall until the
+		// timeout kills the scan. Configuring vt_api_key IS the user's VT opt-in,
+		// so pre-accepting here is faithful to their intent.
+		//
+		// -v blocks on a VirusTotal hash lookup per unique autostart binary, so a
+		// cold-cache first run over a few hundred entries can legitimately exceed
+		// the 45s default — raise the (still bounded) budget for this path only.
+		args = append(args, "-v", "-vt")
+		timeout = autorunsVTTimeout
 	}
 
-	out, err := run.ToolCtx(ctx, run.DefaultTimeout, cfg.AutorunsPath, args...)
+	out, err := run.ToolCtx(ctx, timeout, cfg.AutorunsPath, args...)
 	if err != nil {
 		return "", fmt.Errorf("autorunsc failed: %w", err)
 	}

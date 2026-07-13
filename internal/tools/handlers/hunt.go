@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -35,11 +36,10 @@ type HuntReport struct {
 	DurationMs       int64  `json:"duration_ms"`
 	ExecutiveSummary string `json:"executive_summary"`
 	Availability     struct {
-		ProcessExplorer bool `json:"process_explorer"`
-		Autoruns        bool `json:"autoruns"`
-		Sysmon          bool `json:"sysmon"`
-		VirusTotal      bool `json:"virus_total"`
-		GeoIP           bool `json:"geo_ip"`
+		Autoruns   bool `json:"autoruns"`
+		Sysmon     bool `json:"sysmon"`
+		VirusTotal bool `json:"virus_total"`
+		GeoIP      bool `json:"geo_ip"`
 	} `json:"tool_availability"`
 	Findings           []Finding `json:"findings"`
 	Critical           []Finding `json:"critical"`
@@ -60,7 +60,6 @@ func RunFullHunt(ctx context.Context, cfg *config.Config) (string, error) {
 	}
 
 	avail := cfg.Availability()
-	report.Availability.ProcessExplorer = avail.ProcessExplorer
 	report.Availability.Autoruns = avail.Autoruns
 	report.Availability.Sysmon = avail.Sysmon
 	report.Availability.VirusTotal = avail.VirusTotal
@@ -97,7 +96,13 @@ func RunFullHunt(ctx context.Context, cfg *config.Config) (string, error) {
 	}
 	if ctx.Err() == nil {
 		// ── Stage 4: Sysmon Forensics (last 60 min) ───────────────────
-		findings = append(findings, runStage4(ctx, cfg)...)
+		// Availability is PROBED live (the query script checks the channel
+		// exists), not read from config — sysmon_log always carries a default,
+		// so the config-level flag alone would report "available" on machines
+		// that never installed Sysmon.
+		st4, sysmonLive := runStage4(ctx, cfg)
+		findings = append(findings, st4...)
+		report.Availability.Sysmon = sysmonLive
 	}
 	if ctx.Err() == nil {
 		// ── Stage 5: VirusTotal Hash Escalation ────────────────────────
@@ -388,22 +393,27 @@ func runStage3(ctx context.Context, cfg *config.Config) []Finding {
 
 // runStage4 queries Sysmon for the last 60 minutes of process creation and
 // network connection events, flagging suspicious spawns and beacon-like patterns.
-func runStage4(ctx context.Context, cfg *config.Config) []Finding {
+// The second return reports whether the Sysmon channel actually EXISTS on this
+// machine: the query script probes it live (ErrSysmonChannelMissing), because the
+// config-level availability flag is always true (sysmon_log carries a default).
+// A missing channel yields an INFO/TOOL_UNAVAILABLE finding — never a silent
+// clean stage.
+func runStage4(ctx context.Context, cfg *config.Config) ([]Finding, bool) {
 	var findings []Finding
-	if !cfg.Availability().Sysmon {
+
+	// ── ID 1: ProcessCreate — suspicious parent-child spawns ────────────
+	rawCreate, err := GetProcessCreateEvents(ctx, cfg, 60)
+	if errors.Is(err, ErrSysmonChannelMissing) {
 		findings = append(findings, Finding{
 			Stage:       4,
 			Severity:    SeverityInfo,
 			Category:    "TOOL_UNAVAILABLE",
-			Description: "Sysmon not configured. Install Sysmon and restart to enable forensic timeline.",
+			Description: fmt.Sprintf("Sysmon event log channel %q not found — Sysmon is not installed (or the channel is not accessible). Install Sysmon to enable the forensic timeline.", cfg.SysmonLog),
 			Entity:      "sysmon",
 			Confidence:  "HIGH",
 		})
-		return findings
+		return findings, false
 	}
-
-	// ── ID 1: ProcessCreate — suspicious parent-child spawns ────────────
-	rawCreate, err := GetProcessCreateEvents(ctx, cfg, 60)
 	if err != nil {
 		findings = append(findings, scanError(4, "sysmon-processcreate", err))
 	} else {
@@ -437,6 +447,20 @@ func runStage4(ctx context.Context, cfg *config.Config) []Finding {
 
 	// ── ID 3: NetworkConnect — detect unusual outbound connections ───────
 	rawNet, err := GetNetworkEvents(ctx, cfg, 60)
+	if errors.Is(err, ErrSysmonChannelMissing) {
+		// Channel vanished between the two queries (or the first timed out
+		// while this one's probe found it gone) — mirror the first branch so
+		// the report never says sysmon:true beside a channel-not-found error.
+		findings = append(findings, Finding{
+			Stage:       4,
+			Severity:    SeverityInfo,
+			Category:    "TOOL_UNAVAILABLE",
+			Description: fmt.Sprintf("Sysmon event log channel %q not found — Sysmon is not installed (or the channel is not accessible). Install Sysmon to enable the forensic timeline.", cfg.SysmonLog),
+			Entity:      "sysmon",
+			Confidence:  "HIGH",
+		})
+		return findings, false
+	}
 	if err != nil {
 		findings = append(findings, scanError(4, "sysmon-network", err))
 	} else {
@@ -488,7 +512,7 @@ func runStage4(ctx context.Context, cfg *config.Config) []Finding {
 		}
 	}
 
-	return findings
+	return findings, true
 }
 
 func isSuspiciousParentInSysmon(parent, child string) bool {
@@ -625,7 +649,7 @@ func buildRecommendations(r HuntReport) []string {
 		recs = append(recs, "Configure autoruns_path in config.json to enable full persistence check (Stage 2).")
 	}
 	if !r.Availability.Sysmon {
-		recs = append(recs, "Install Sysmon with a configuration file to enable forensic timeline (Stage 4).")
+		recs = append(recs, "Install Sysmon with a configuration file to enable forensic timeline (Stage 4) — or, if Sysmon is already installed, run the MCP host elevated so its event channel is readable.")
 	}
 	if !r.Availability.VirusTotal {
 		recs = append(recs, "Add a free VirusTotal API key (vt_api_key) to config.json to enable hash reputation scoring.")

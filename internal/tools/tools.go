@@ -151,7 +151,7 @@ func Registry() []ToolDef {
 		},
 		{
 			Name:        "get_process_detail",
-			Description: "Get deep detail on a single process: full command line, working directory, environment variables (all names listed; values shown only for an allowlist of non-sensitive names, everything else [REDACTED]), open file handles count, and thread count. All string values are OS-sourced and treated as untrusted.",
+			Description: "Get deep detail on a single process: full command line, working directory, environment variables (all names listed; values shown only for an allowlist of non-sensitive names, everything else [REDACTED]), open kernel-handle count (omitted when unreadable), and thread count. All string values are OS-sourced and treated as untrusted.",
 			InputSchema: pidSchema(),
 		},
 		{
@@ -175,7 +175,7 @@ func Registry() []ToolDef {
 			InputSchema: emptySchema(),
 		},
 
-		// ── Stage 1: Process Explorer ────────────────────────────────────────
+		// ── Stage 1: Signing (built-in Authenticode) ─────────────────────────
 		{
 			Name:        "get_process_tree",
 			Description: "Return the full parent-child process tree with Authenticode signing status. Uses Windows Get-AuthenticodeSignature directly — no external Sysinternals tools required.",
@@ -312,7 +312,7 @@ func callInner(ctx context.Context, cfg *config.Config, name string, args json.R
 	case "get_startup_entries":
 		return handlers.GetStartupEntries(ctx)
 
-	// Stage 1 — Process Explorer
+	// Stage 1 — Signing (built-in Authenticode)
 	case "get_process_tree":
 		return handlers.GetProcessTree(ctx, cfg)
 	case "get_unsigned_processes":

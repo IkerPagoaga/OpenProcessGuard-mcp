@@ -2,7 +2,7 @@
 
 > A free, open-source Windows security monitoring server for Claude Desktop.
 
-ProcessGuard exposes live process telemetry, persistence checks, network analysis, and Sysmon forensics through 17 tools organised across 5 hunting stages — all callable by Claude in plain language.
+ProcessGuard exposes live process telemetry, persistence checks, network analysis, and Sysmon forensics through 17 tools organised across five hunt stages plus the always-on native Stage 0 — all callable by Claude in plain language.
 
 **Built on the belief that security tooling should be open, auditable, and free.**
 
@@ -20,7 +20,7 @@ ProcessGuard exposes live process telemetry, persistence checks, network analysi
 
 **Free as in freedom.** MIT licensed. Fork it, extend it, contribute back.
 
-**Microsoft Sysinternals notice.** The optional Stages 1 and 2 integrate with Sysinternals tools (Process Explorer, Autoruns) published by Microsoft under a [separate licence](https://learn.microsoft.com/en-us/sysinternals/license-terms). Those tools are not bundled — you download them directly from Microsoft. Because of that licence, **ProcessGuard cannot be used as part of a commercial or monetised product when Sysinternals integration is enabled.** Stages 0, 3, 4, and 5 (native process enumeration, network analysis, Sysmon, and VirusTotal) are unrestricted.
+**Microsoft Sysinternals notice.** The optional Stage 2 (Autoruns) and Stage 4 (Sysmon) integrate with Sysinternals tools published by Microsoft under a [separate licence](https://learn.microsoft.com/en-us/sysinternals/license-terms). Those tools are not bundled — you download them directly from Microsoft. Because of that licence, **ProcessGuard cannot be used as part of a commercial or monetised product when Sysinternals integration is enabled.** Stages 0, 1, 3, and 5 (native process enumeration, built-in Authenticode signing, network analysis, and VirusTotal) are unrestricted. See [§15 Licence](#15-licence).
 
 ---
 
@@ -33,7 +33,7 @@ ProcessGuard exposes live process telemetry, persistence checks, network analysi
 .\install.ps1 -BinaryPath .\processguard-mcp.exe
 ```
 
-**Option B — from source** (Go auto-selects the pinned `go1.25.11` toolchain):
+**Option B — from source** (Go auto-selects the pinned `go1.25.12` toolchain):
 
 ```powershell
 git clone https://github.com/IkerPagoaga/OpenProcessGuard-mcp.git
@@ -97,11 +97,11 @@ Before you start, make sure the following are installed on your Windows machine.
 | Software | Version | Download |
 |---|---|---|
 | Windows | 10 or 11 (64-bit) | — |
-| Go | 1.22 or newer | https://go.dev/dl/ |
+| Go | 1.25 or newer | https://go.dev/dl/ |
 | Git | Any recent version | https://git-scm.com/download/win |
 | Claude Desktop | Latest | https://claude.ai/download |
 
-> **Go 1.22 is the source-compatibility floor, not the build toolchain.** `go.mod` pins `toolchain go1.25.11` (it resolves several standard-library advisories reachable via the VirusTotal HTTPS client). With the default `GOTOOLCHAIN=auto`, the first build on an older Go transparently downloads `go1.25.11` — which needs network access and will fail behind a strict proxy or offline. In that case install Go 1.25.11+ directly, or set `GOTOOLCHAIN=local` to build with your installed Go (only if it is ≥ 1.25.11).
+> **Go 1.25 is the source floor; the pinned build toolchain is `go1.25.12`** (it resolves several standard-library advisories reachable via the VirusTotal HTTPS client). With the default `GOTOOLCHAIN=auto`, the first build on an older Go transparently downloads `go1.25.12` — which needs network access and will fail behind a strict proxy or offline. In that case install Go 1.25.12+ directly, or set `GOTOOLCHAIN=local` to build with your installed Go (only if it is ≥ 1.25.12).
 
 **Verify Go is installed** — open a terminal (`Win + R` → type `cmd` → Enter) and run:
 
@@ -109,11 +109,13 @@ Before you start, make sure the following are installed on your Windows machine.
 go version
 ```
 
-You should see something like `go version go1.22.0 windows/amd64`. If not, reinstall Go and check "Add to PATH" during setup.
+You should see something like `go version go1.25.12 windows/amd64`. If not, reinstall Go and check "Add to PATH" during setup.
 
 ---
 
 ## 2. Clone the Repository
+
+> **⚠️ Dev-only path.** Sections 2–6 are the manual, build-it-yourself setup: they register the binary from your **user-writable clone folder** and then run Claude Desktop elevated. That is exactly the binary-planting scenario [SECURITY.md](SECURITY.md) warns about — anything that can write to the clone folder could replace the exe an elevated server runs. Fine on a single-user dev box you trust; for anything else, use the **recommended path** (Quick start above): a verified signed release installed by `install.ps1` into the admin-only-writable `%ProgramFiles%\ProcessGuard`.
 
 ```
 git clone https://github.com/IkerPagoaga/OpenProcessGuard-mcp.git
@@ -138,7 +140,7 @@ Go downloads all dependencies automatically. This takes about 30 seconds on firs
 dir processguard-mcp.exe
 ```
 
-You should see a file around 8 MB. If the build fails, confirm Go 1.22 or newer is installed (`go version`).
+You should see a file around 10 MB (the release pipeline's `-s -w` flags trim it further). If the build fails, confirm Go 1.25 or newer is installed (`go version`).
 
 > You do not need to install any packages manually — `go build` handles everything via `go.mod`.
 
@@ -160,9 +162,7 @@ This gets all 6 Stage 0 tools working immediately — no additional software nee
 
 ```json
 {
-  "procexp_path":  "",
   "autoruns_path": "",
-  "tcpview_path":  "",
   "sysmon_log":    "Microsoft-Windows-Sysmon/Operational",
   "vt_api_key":    "",
   "geoip_db":      "",
@@ -174,9 +174,7 @@ This gets all 6 Stage 0 tools working immediately — no additional software nee
 
 ```json
 {
-  "procexp_path":  "",
   "autoruns_path": "C:\\Tools\\SysinternalsSuite\\autorunsc.exe",
-  "tcpview_path":  "",
   "sysmon_log":    "Microsoft-Windows-Sysmon/Operational",
   "vt_api_key":    "your_virustotal_api_key_here",
   "geoip_db":      "C:\\Tools\\GeoIP\\GeoLite2-City.mmdb",
@@ -188,9 +186,7 @@ This gets all 6 Stage 0 tools working immediately — no additional software nee
 
 | Field | Required | Default | Description |
 |---|---|---|---|
-| `procexp_path` | No | `""` | Reserved — not used. Stage 1 signing comes from the built-in `Get-AuthenticodeSignature`; no Process Explorer download is needed. |
 | `autoruns_path` | No | `""` | Full path to `autorunsc.exe`. Enables Stage 2 persistence scanning. |
-| `tcpview_path` | No | `""` | Reserved — not yet active. |
 | `sysmon_log` | No | `"Microsoft-Windows-Sysmon/Operational"` | Windows Event Log channel for Sysmon. Only alphanumeric characters, spaces, hyphens, slashes, underscores, and dots are allowed. |
 | `vt_api_key` | No | `""` | Free VirusTotal API key. Enables `lookup_hash` and Stage 5 hash escalation. Never echoed in output or logs. |
 | `geoip_db` | No | `""` | Path to MaxMind `GeoLite2-City.mmdb`. Enables country/city data on foreign connections. |
@@ -225,6 +221,8 @@ Open (or create) `claude_desktop_config.json` and add the ProcessGuard entry:
 If the file already has other MCP servers, add the `processguard` block inside the existing `mcpServers` object.
 
 > Replace `C:\\path\\to\\OpenProcessGuard-mcp\\` with the actual folder where you cloned the repo. Use double backslashes.
+
+> **⚠️ Security:** this registers an exe living in a **user-writable folder** with a server you are about to run **as Administrator** (Step 6). Do not use this registration on a shared or untrusted machine — install via `install.ps1` instead, which places the binary under the admin-only-writable `%ProgramFiles%\ProcessGuard` and registers that path. See the warning in [SECURITY.md](SECURITY.md) ("Do not relocate the binary to a user-writable directory").
 
 ---
 
@@ -263,7 +261,7 @@ Then run the full baseline scan:
 Run run_full_hunt and summarise all findings by severity.
 ```
 
-Stages with unconfigured tools (Autoruns, Sysmon, VirusTotal) will appear as `INFO / TOOL_UNAVAILABLE` findings with instructions on how to enable them.
+Stages whose tools are unconfigured or not installed (Autoruns, Sysmon, VirusTotal) will appear as `INFO / TOOL_UNAVAILABLE` findings with instructions on how to enable them — Sysmon's availability is probed live against the Event Log channel, so a machine without Sysmon is reported honestly rather than counted as a clean stage.
 
 ---
 
@@ -277,7 +275,7 @@ Each optional tool unlocks additional hunting stages. Install them in any order.
 
 Enables: `get_process_tree`, `get_unsigned_processes`
 
-Stage 1 derives Authenticode signing status from the built-in Windows `Get-AuthenticodeSignature` — **no Sysinternals download is needed.** (`procexp_path` is reserved and currently unused: Process Explorer has no headless CSV-export mode, so it was replaced by the native signing path.)
+Stage 1 derives Authenticode signing status from the built-in Windows `Get-AuthenticodeSignature` — **no Sysinternals download is needed**, and no configuration either: these tools work out of the box.
 
 ---
 
@@ -294,6 +292,8 @@ Enables: `get_autoruns_entries`, `flag_autoruns_anomalies`, Stage 2 in `run_full
 ```
 
 > Use `autorunsc.exe` (command-line version), not `autoruns.exe` (GUI version).
+
+> **VirusTotal interaction:** if you also configure `vt_api_key`, every Autoruns scan runs `autorunsc -v -vt` — autorunsc submits the SHA256 **hashes** of your autostart binaries (never file contents) to VirusTotal through its own anonymous integration, and `-vt` records your acceptance of the [VirusTotal terms](https://www.virustotal.com/en/about/terms-of-service/) under `HKCU\Software\Sysinternals` (persistent — it also covers future manual autorunsc runs). Configuring the key is treated as that opt-in; leave `vt_api_key` empty for a fully offline Autoruns stage.
 
 4. Restart Claude Desktop.
 
@@ -322,6 +322,8 @@ Enables: `lookup_hash`, VT hash escalation in `run_full_hunt`
 4. Restart Claude Desktop.
 
 > Free tier: 4 requests/minute, 500/day. ProcessGuard caps VT calls at 10 per full hunt automatically.
+
+> **Side effect on the Autoruns stage:** with a key configured, Autoruns scans also query VirusTotal via autorunsc's own integration (hash submission only — see the note in the Autoruns section above). Those calls don't use your key and don't count against ProcessGuard's per-hunt cap.
 
 ---
 
@@ -364,9 +366,7 @@ Get-Service Sysmon64
 
 You should see `Status: Running`.
 
-> No `config.json` change needed — `sysmon_log` defaults to the correct Windows Event Log channel.
-
-5. Restart Claude Desktop.
+> No `config.json` change needed — `sysmon_log` defaults to the correct Windows Event Log channel. **No Claude Desktop restart needed either**: events are queried live from the Event Log, so the very next `run_full_hunt` picks Sysmon up.
 
 ---
 
@@ -378,7 +378,7 @@ You should see `Status: Running`.
 - Restart Claude Desktop as Administrator after every config change.
 
 **`go build` fails**
-- Confirm Go 1.22 or newer is installed (`go version`).
+- Confirm Go 1.25 or newer is installed (`go version`).
 - Confirm you are inside the `OpenProcessGuard-mcp` folder when you run `go build`.
 
 **`list_processes` returns fewer processes than expected**
@@ -528,7 +528,6 @@ processguard-mcp.exe  (stdio JSON-RPC 2.0 — MCP protocol)
 ├── internal/config        Config load, validation, and tool availability matrix
 ├── internal/audit         Append-only JSONL audit log (%APPDATA%\ProcessGuard\audit.log)
 ├── internal/geoip         MaxMind GeoLite2 wrapper + private-IP CIDR detection
-├── internal/procex        (reserved, unused) procexp path check
 └── internal/tools
     ├── tools.go           Registry + Call() dispatcher + output sanitisation boundary
     └── handlers/

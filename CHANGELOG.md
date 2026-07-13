@@ -6,6 +6,89 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-13
+
+Polish release driven by a fifth external review (every finding of which was
+verified against the code before being acted on).
+
+### Fixed
+- **Sysmon availability is now probed live — a machine without Sysmon can no longer
+  read as a clean Stage 4.** `sysmon_log` always carries a default, so the config-level
+  availability flag was permanently true: the Stage-4 `TOOL_UNAVAILABLE` finding and the
+  "Install Sysmon" recommendation were unreachable dead code, and on a Sysmon-less
+  machine the query's `-ErrorAction SilentlyContinue` swallowed the missing-channel
+  error, reporting the stage silently clean — a violation of the project's own
+  "absence of findings is not proof" principle. The query script now checks the Event
+  Log channel exists first (`Get-WinEvent -ListLog`) and emits a distinguishable
+  marker when it doesn't; `run_full_hunt` reports the probed availability, surfaces
+  the `INFO / TOOL_UNAVAILABLE` finding, and recommends installing Sysmon. The three
+  standalone Sysmon tools return a clear "is Sysmon installed?" error instead of `[]`.
+  The event query itself also fails loud now: it runs with `-ErrorAction Stop`,
+  classifies the benign zero-events case by locale-invariant
+  `FullyQualifiedErrorId` (never message text), and reports every other read
+  failure — access denied on a non-elevated host, EventLog service down — as a
+  query error (`SCAN_ERROR` in the hunt) instead of masquerading as an empty
+  result, closing the second silent-clean lane the probe alone did not cover.
+- **`autorunsc` is invoked with `-vt` alongside `-v`.** Without `-vt`, a machine where
+  the VirusTotal terms of service were never accepted gets an interactive prompt (per
+  Microsoft's Autoruns documentation) — in this headless context that meant Stage 2
+  and `get_autoruns_entries` stalled until the 45s timeout killed them. Because `-v`
+  performs a VirusTotal hash lookup per unique autostart binary, the VT-enabled
+  autorunsc path now runs under a raised (still hard-bounded) 180s budget so a
+  cold-cache first scan is not killed by the 45s default. SECURITY.md and README §8
+  now disclose the full behavior: with a key configured, Autoruns scans submit binary
+  **hashes** (never file contents) to VirusTotal via autorunsc's own integration, and
+  `-vt` records a persistent ToS acceptance under `HKCU\Software\Sysinternals`.
+- **`get_process_detail.open_handles` is real now.** gopsutil's `NumFDs` is not
+  implemented on Windows (the only supported OS), so the field always rendered 0. The
+  count now comes from the Windows `GetProcessHandleCount` API (via
+  `golang.org/x/sys/windows`, resolved from System32 only) and is omitted entirely
+  when it cannot be read — never a fake zero.
+- **`get_process_tree` can no longer fail on a PPID cycle.** Windows PID reuse can
+  make a snapshot claim A's parent is B while B's recorded parent PID was reused by
+  A; linking both built a cyclic node graph, and `json.Marshal` fails on cycles,
+  killing the whole response. A cycle-breaking ancestry check roots the offending
+  node instead (regression-tested).
+
+### Removed
+- **`list_processes.status` field** — gopsutil's `Status` is likewise unimplemented on
+  Windows, so it was a permanently-empty column implying a capability the tool never
+  had.
+- **`procexp_path` and `tcpview_path` config fields, and the reserved `internal/procex`
+  package.** Stage-1 signing has come from the built-in `Get-AuthenticodeSignature`
+  since v2.1.0 and the TCPView integration was never activated — the fields were pure
+  carrying cost. Config compatibility: old `config.json` files that still carry these
+  keys keep working (unknown fields are ignored). `run_full_hunt`'s `tool_availability`
+  no longer reports `process_explorer`, and its `sysmon` value now reflects the live
+  probe rather than the config default.
+
+### Changed
+- **Toolchain pinned to `go1.25.12`** (carries stdlib fixes that landed after
+  go1.25.11). `golang.org/x/sys` promoted to a direct dependency (for
+  `GetProcessHandleCount`) and bumped v0.20.0 → v0.47.0, clearing the uncalled
+  GO-2026-5024 advisory — `govulncheck` now reports zero vulnerabilities anywhere
+  in the dependency graph. The x/sys bump raises the source floor from Go 1.22 to
+  Go 1.25 (with the default `GOTOOLCHAIN=auto` this is transparent — older Go
+  fetches the pinned toolchain automatically). CI actions bumped to their Node-24
+  majors (`actions/checkout@v7`, `actions/setup-go@v6`).
+- `install.ps1` source builds now inject `Commit` and `BuildDate` (matching the
+  Makefile/goreleaser), so `serverInfo` no longer reports `commit: none` on a source
+  install.
+- `config.example.json` ships all-empty (no pre-filled paths to tools that are not
+  installed), matching the README's minimum config.
+
+### Documentation
+- **Corrected the README's Sysinternals licensing notice**, which contradicted the
+  LICENSE: the Sysinternals-licensed integrations are Stage 2 (Autoruns) and Stage 4
+  (Sysmon) — not "Stages 1 and 2" — and the unrestricted stages are 0, 1, 3, and 5.
+- **The manual build-and-register path (README §2–6) is now explicitly labeled
+  dev-only**, with a warning that registering an exe from a user-writable clone folder
+  with an elevated Claude Desktop is the binary-planting scenario SECURITY.md warns
+  about; the recommended path is the verified signed release via `install.ps1`.
+- Sysmon setup no longer instructs a needless Claude Desktop restart (events are
+  queried live); the from-source size estimate corrected to ~10 MB; the stage count
+  phrased as "five hunt stages plus the always-on Stage 0".
+
 ## [2.3.0] - 2026-07-13
 
 ### Changed

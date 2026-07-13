@@ -110,7 +110,7 @@ func GetForeignConnections(ctx context.Context, cfg *config.Config) (string, err
 }
 
 // collectConnections runs netstat and returns all connections enriched with
-// process names. Uses tcpvcon.exe if configured, falls back to netstat.
+// process names.
 func collectConnections(ctx context.Context, cfg *config.Config) ([]EnrichedConnection, error) {
 	pidNames := map[int32]string{}
 	procs, _ := process.Processes()
@@ -118,11 +118,6 @@ func collectConnections(ctx context.Context, cfg *config.Config) ([]EnrichedConn
 		if name, err := p.Name(); err == nil {
 			pidNames[p.Pid] = name
 		}
-	}
-
-	if cfg.TCPViewPath != "" {
-		// TODO(P3): tcpvcon.exe -c -a outputs a CSV with richer state info.
-		// Fall through to netstat for now.
 	}
 
 	return netstatConnections(ctx, pidNames)

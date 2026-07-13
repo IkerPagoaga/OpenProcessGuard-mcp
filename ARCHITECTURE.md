@@ -77,9 +77,13 @@ disabled so `<`, `>`, `&` render literally.
 ## Design principles
 
 - **Read-only.** No tool mutates the system.
-- **Graceful degradation.** Optional stages (Autoruns,
-  Sysmon, VirusTotal, GeoIP) are unavailable, never fatal, when unconfigured.
-  Native Stage-0 tools always work.
+- **Graceful degradation — never silent.** Optional stages (Autoruns,
+  Sysmon, VirusTotal, GeoIP) are unavailable, never fatal, when unconfigured —
+  and unavailability is REPORTED (`TOOL_UNAVAILABLE`), never conflated with a
+  clean scan. Sysmon is the special case: its channel name always has a default,
+  so availability is probed live (the query script checks the Event Log channel
+  exists and emits a distinguishable marker when it doesn't) rather than read
+  from config. Native Stage-0 tools always work.
 - **No secrets on the wire.** The VirusTotal key is never echoed in output, errors,
   or the audit log.
 - **Bounded everything.** Timeouts AND lifetime-cancellation on external

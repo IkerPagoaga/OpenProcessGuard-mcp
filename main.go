@@ -16,7 +16,6 @@ import (
 
 	"processguard-mcp/internal/audit"
 	"processguard-mcp/internal/config"
-	"processguard-mcp/internal/procex"
 	"processguard-mcp/internal/tools"
 )
 
@@ -60,15 +59,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Process Explorer is optional and no longer used for signing (that now comes
-	// from Get-AuthenticodeSignature) — only warn if a path was explicitly set but
-	// is missing, instead of on every default headless startup.
-	if cfg.ProcessExplorerPath != "" {
-		if err := procex.VerifyPath(cfg.ProcessExplorerPath); err != nil {
-			slog.Warn("configured procexp_path not found (Process Explorer is optional)", "path", cfg.ProcessExplorerPath)
-		}
-	}
-
 	if cfg.AuditLog {
 		if err := audit.Init(); err != nil {
 			slog.Warn("audit log init failed; continuing without audit", "err", err)
@@ -81,9 +71,10 @@ func main() {
 	avail := cfg.Availability()
 	slog.Info("ProcessGuard MCP ready",
 		"version", Version, "commit", Commit, "built", BuildDate,
-		"process_explorer", avail.ProcessExplorer,
 		"autoruns", avail.Autoruns,
-		"sysmon", avail.Sysmon,
+		// "configured" only — whether the channel actually exists on this
+		// machine is probed live per query (ErrSysmonChannelMissing).
+		"sysmon_log_configured", avail.Sysmon,
 		"virustotal", avail.VirusTotal,
 		"geoip", avail.GeoIP,
 	)

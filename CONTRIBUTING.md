@@ -5,7 +5,7 @@ and clarity matter more than feature count.
 
 ## Development setup
 
-- Go 1.25.11+ (the module pins this toolchain to stay clear of known stdlib
+- Go 1.25.12+ (the module pins this toolchain to stay clear of known stdlib
   advisories; `go` will fetch it automatically).
 - Windows to exercise the handlers at runtime; the pure `internal/parse` tests run
   on any OS.

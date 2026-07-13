@@ -125,7 +125,9 @@ type ProcessInfo struct {
 	MemoryMB   float32 `json:"memory_mb"`
 	ExePath    string  `json:"exe_path"`
 	Username   string  `json:"username"`
-	Status     string  `json:"status"`
+	// No status field: gopsutil's Process.Status is not implemented on Windows
+	// (the only supported OS), so it rendered a permanently-empty value that
+	// implied a capability this tool does not have.
 }
 
 func ListProcesses() (string, error) {
@@ -161,9 +163,6 @@ func ListProcesses() (string, error) {
 		if user, err := p.Username(); err == nil {
 			info.Username = user
 		}
-		if statuses, err := p.Status(); err == nil && len(statuses) > 0 {
-			info.Status = statuses[0]
-		}
 
 		list = append(list, info)
 	}
@@ -179,14 +178,19 @@ func ListProcesses() (string, error) {
 // Environment variable names are all listed, but values are surfaced under a
 // default-deny allowlist — only curated non-sensitive names reveal their value.
 type ProcessDetail struct {
-	PID         int32             `json:"pid"`
-	Name        string            `json:"name"`
-	ExePath     string            `json:"exe_path"`
-	Cmdline     []string          `json:"cmdline"`
-	Cwd         string            `json:"cwd"`
-	Username    string            `json:"username"`
-	ThreadCount int32             `json:"thread_count"`
-	NumFDs      int32             `json:"open_handles"`
+	PID         int32    `json:"pid"`
+	Name        string   `json:"name"`
+	ExePath     string   `json:"exe_path"`
+	Cmdline     []string `json:"cmdline"`
+	Cwd         string   `json:"cwd"`
+	Username    string   `json:"username"`
+	ThreadCount int32    `json:"thread_count"`
+	// HandleCount comes from the Windows GetProcessHandleCount API (see
+	// handles_windows.go) — gopsutil's NumFDs is not implemented on Windows and
+	// always returned 0. omitempty: absent means "could not be read" (access
+	// denied / unsupported platform), never a fake zero — a live process always
+	// holds at least one handle.
+	HandleCount int32             `json:"open_handles,omitempty"`
 	CreateTime  int64             `json:"create_time_unix"`
 	Environ     map[string]string `json:"environ,omitempty"` // non-allowlisted values replaced with [REDACTED]
 }
@@ -217,8 +221,8 @@ func GetProcessDetail(pid int) (string, error) {
 	if threads, err := p.NumThreads(); err == nil {
 		detail.ThreadCount = threads
 	}
-	if fds, err := p.NumFDs(); err == nil {
-		detail.NumFDs = fds
+	if n, err := processHandleCount(int32(pid)); err == nil {
+		detail.HandleCount = n
 	}
 	if ct, err := p.CreateTime(); err == nil {
 		detail.CreateTime = ct

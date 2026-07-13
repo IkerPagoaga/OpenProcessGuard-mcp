@@ -12,7 +12,7 @@
     Native Stage-0 tools work immediately with no further configuration.
 
     With -BinaryPath, installs a prebuilt (signed release) binary. Without it, builds
-    from source using `go build` (requires Go 1.22+).
+    from source using `go build` (requires Go 1.25+).
 
 .PARAMETER BinaryPath
     Path to a prebuilt processguard-mcp.exe (e.g. from a verified GitHub Release).
@@ -63,7 +63,7 @@ if ($BinaryPath) {
 }
 else {
     if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-        throw "Go is not installed. Install Go 1.22+ from https://go.dev/dl/, or re-run with -BinaryPath pointing at a downloaded release binary."
+        throw "Go is not installed. Install Go 1.25+ from https://go.dev/dl/, or re-run with -BinaryPath pointing at a downloaded release binary."
     }
     Write-Host "Building processguard-mcp from source ..."
     $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -71,7 +71,12 @@ else {
     try {
         $version = (git describe --tags --always 2>$null)
         if (-not $version) { $version = 'dev' }
-        go build -ldflags "-s -w -X main.Version=$version" -o $target .
+        # Match the Makefile/goreleaser ldflags so a source install reports a real
+        # commit + build date in serverInfo instead of "none"/"unknown".
+        $commit = (git rev-parse --short HEAD 2>$null)
+        if (-not $commit) { $commit = 'none' }
+        $buildDate = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        go build -ldflags "-s -w -X main.Version=$version -X main.Commit=$commit -X main.BuildDate=$buildDate" -o $target .
         if ($LASTEXITCODE -ne 0) { throw "go build failed" }
     }
     finally { Pop-Location }
