@@ -56,26 +56,77 @@ func GetEstablishedConnections(ctx context.Context, cfg *config.Config) (string,
 // configured.  GeoIP country/city enrichment only happens when geoip_db points
 // to a valid MaxMind mmdb file.
 func GetForeignConnections(ctx context.Context, cfg *config.Config) (string, error) {
-	all, err := collectConnections(ctx, cfg)
+	scan, err := foreignConnections(ctx, cfg)
 	if err != nil {
 		return "", err
 	}
+
+	out := struct {
+		GeoIPEnabled bool                 `json:"geoip_enabled"`
+		GeoIPError   string               `json:"geoip_error,omitempty"`
+		Count        int                  `json:"count"`
+		Connections  []EnrichedConnection `json:"connections"`
+	}{
+		GeoIPEnabled: scan.GeoEnabled,
+		Count:        len(scan.Connections),
+		Connections:  scan.Connections,
+	}
+	if scan.GeoErr != nil {
+		out.GeoIPError = fmt.Sprintf(
+			"geoip_db is configured but could not be opened (%v) — country attribution is DISABLED for this result. "+
+				"Private-range filtering still applied.", scan.GeoErr)
+	}
+
+	result, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
+}
+
+// foreignScan carries the foreign-connection rows plus the GeoIP enrichment STATUS.
+// That status is load-bearing: a geoip_db pointing at a corrupt or unreadable mmdb was
+// previously swallowed here, while config.Availability() had already reported
+// geoip:true from a bare fileExists check — so the hunt report claimed country
+// enrichment it never performed and every row simply came back without one.
+type foreignScan struct {
+	Connections []EnrichedConnection
+	GeoEnabled  bool
+	GeoErr      error
+}
+
+// foreignConnections is the internal scan path. In-process callers (run_full_hunt) use
+// it instead of unmarshalling the tool-facing JSON, so they receive the GeoIP status as
+// typed data rather than losing it.
+func foreignConnections(ctx context.Context, cfg *config.Config) (foreignScan, error) {
+	all, err := collectConnections(ctx, cfg)
+	if err != nil {
+		return foreignScan{}, err
+	}
+
+	var scan foreignScan
 
 	// Always open a DB so Lookup() can detect private ranges.
 	// When geoip_db is empty, Open("") returns a no-op DB that only
 	// classifies private vs public — no country data, no file required.
 	var db *geoip.DB
-	var geoEnabled bool
 	if cfg.GeoIPDB != "" {
-		if opened, err := geoip.Open(cfg.GeoIPDB); err == nil {
+		opened, openErr := geoip.Open(cfg.GeoIPDB)
+		if openErr != nil {
+			// Configured but unusable. Record it and fall through to the no-op DB so
+			// private-range filtering still works — but never continue as though
+			// enrichment were active.
+			scan.GeoErr = openErr
+		} else {
 			db = opened
-			geoEnabled = true
+			scan.GeoEnabled = true
 			defer db.Close()
 		}
 	}
 	if db == nil {
 		db, _ = geoip.Open("") // no-op: private-range detection only
 	}
+	geoEnabled := scan.GeoEnabled
 
 	var foreign []EnrichedConnection
 	for _, c := range all {
@@ -102,11 +153,8 @@ func GetForeignConnections(ctx context.Context, cfg *config.Config) (string, err
 	if foreign == nil {
 		foreign = []EnrichedConnection{}
 	}
-	result, err := json.MarshalIndent(foreign, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(result), nil
+	scan.Connections = foreign
+	return scan, nil
 }
 
 // collectConnections runs netstat and returns all connections enriched with

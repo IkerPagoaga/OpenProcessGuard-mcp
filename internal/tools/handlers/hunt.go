@@ -41,12 +41,53 @@ type HuntReport struct {
 		VirusTotal bool `json:"virus_total"`
 		GeoIP      bool `json:"geo_ip"`
 	} `json:"tool_availability"`
+	// Findings is the single source of truth. The severity fields below are INDEX
+	// arrays into it, not copies: they used to hold full Finding structs, which made
+	// exactly half of this report's bytes a byte-identical duplicate of the other half
+	// (measured at 43,854 duplicated bytes in an 88,469-byte report). For the flagship
+	// tool whose output competes for the model's context window, that was the single
+	// largest avoidable cost in the payload.
 	Findings           []Finding `json:"findings"`
-	Critical           []Finding `json:"critical"`
-	High               []Finding `json:"high"`
-	Medium             []Finding `json:"medium"`
-	Info               []Finding `json:"info"`
+	Critical           []int     `json:"critical"`
+	High               []int     `json:"high"`
+	Medium             []int     `json:"medium"`
+	Info               []int     `json:"info"`
 	RecommendedActions []string  `json:"recommended_actions"`
+}
+
+// severityIndex returns the index bucket for a severity, so callers (and tests) can
+// resolve a bucket back to the findings it points at.
+func (r HuntReport) severityIndex(s string) []int {
+	switch s {
+	case SeverityCritical:
+		return r.Critical
+	case SeverityHigh:
+		return r.High
+	case SeverityMedium:
+		return r.Medium
+	default:
+		return r.Info
+	}
+}
+
+// indexBySeverity groups finding POSITIONS by severity. Pure and total (every slice is
+// non-nil so the JSON never contains a bare null), which makes the index↔finding
+// correspondence unit-testable without running a real hunt.
+func indexBySeverity(findings []Finding) (critical, high, medium, info []int) {
+	critical, high, medium, info = []int{}, []int{}, []int{}, []int{}
+	for i, f := range findings {
+		switch f.Severity {
+		case SeverityCritical:
+			critical = append(critical, i)
+		case SeverityHigh:
+			high = append(high, i)
+		case SeverityMedium:
+			medium = append(medium, i)
+		default:
+			info = append(info, i)
+		}
+	}
+	return critical, high, medium, info
 }
 
 // RunFullHunt orchestrates all five hunting stages and returns a HuntReport.
@@ -92,7 +133,12 @@ func RunFullHunt(ctx context.Context, cfg *config.Config) (string, error) {
 	}
 	if ctx.Err() == nil {
 		// ── Stage 3: Network Visibility ────────────────────────────────
-		findings = append(findings, runStage3(ctx, cfg)...)
+		// GeoIP availability is corrected from the LIVE open result, not the
+		// config-level fileExists check — a corrupt mmdb passes fileExists but
+		// enriches nothing.
+		st3, geoLive := runStage3(ctx, cfg)
+		findings = append(findings, st3...)
+		report.Availability.GeoIP = geoLive
 	}
 	if ctx.Err() == nil {
 		// ── Stage 4: Sysmon Forensics (last 60 min) ───────────────────
@@ -112,37 +158,11 @@ func RunFullHunt(ctx context.Context, cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("hunt aborted: %w", err)
 	}
 
-	// Bucket findings by severity
 	report.Findings = findings
-	for _, f := range findings {
-		switch f.Severity {
-		case SeverityCritical:
-			report.Critical = append(report.Critical, f)
-		case SeverityHigh:
-			report.High = append(report.High, f)
-		case SeverityMedium:
-			report.Medium = append(report.Medium, f)
-		default:
-			report.Info = append(report.Info, f)
-		}
-	}
-
-	// Ensure no nil slices in JSON output
-	if report.Critical == nil {
-		report.Critical = []Finding{}
-	}
-	if report.High == nil {
-		report.High = []Finding{}
-	}
-	if report.Medium == nil {
-		report.Medium = []Finding{}
-	}
-	if report.Info == nil {
-		report.Info = []Finding{}
-	}
 	if report.Findings == nil {
 		report.Findings = []Finding{}
 	}
+	report.Critical, report.High, report.Medium, report.Info = indexBySeverity(findings)
 
 	// DurationMs must be set BEFORE buildSummary — the summary embeds it, and
 	// the struct is passed by value, so setting it afterwards reported 0ms.
@@ -360,20 +380,31 @@ func runStage2(available bool, entries []AutorunEntry, fetchErr error) []Finding
 	return findings
 }
 
-// runStage3 runs foreign connection detection.
-func runStage3(ctx context.Context, cfg *config.Config) []Finding {
+// runStage3 runs foreign connection detection. The second return reports whether GeoIP
+// enrichment was ACTUALLY active: config.Availability() only checks that the mmdb file
+// exists, so a corrupt or unreadable database would otherwise leave the report claiming
+// geoip:true beside rows that carry no country at all.
+func runStage3(ctx context.Context, cfg *config.Config) ([]Finding, bool) {
 	var findings []Finding
 
-	raw, err := GetForeignConnections(ctx, cfg)
+	scan, err := foreignConnections(ctx, cfg)
 	if err != nil {
-		return append(findings, scanError(3, "network", err))
+		return append(findings, scanError(3, "network", err)), false
 	}
-	var conns []EnrichedConnection
-	if err := json.Unmarshal([]byte(raw), &conns); err != nil {
-		return append(findings, scanError(3, "network", err))
+	if scan.GeoErr != nil {
+		findings = append(findings, Finding{
+			Stage:    3,
+			Severity: SeverityInfo,
+			Category: "TOOL_UNAVAILABLE",
+			Description: fmt.Sprintf(
+				"geoip_db is configured but could not be opened (%v) — connections are reported WITHOUT country attribution. "+
+					"Replace or remove the mmdb file to restore enrichment.", scan.GeoErr),
+			Entity:     "geoip",
+			Confidence: "HIGH",
+		})
 	}
 
-	for _, c := range conns {
+	for _, c := range scan.Connections {
 		desc := fmt.Sprintf("Process %q (PID %d) has an ESTABLISHED connection to %s", c.ProcessName, c.PID, c.RemoteAddr)
 		if c.GeoIP != nil && c.GeoIP.CountryName != "" {
 			desc += fmt.Sprintf(" (%s)", c.GeoIP.CountryName)
@@ -388,7 +419,7 @@ func runStage3(ctx context.Context, cfg *config.Config) []Finding {
 			Confidence:  "MEDIUM",
 		})
 	}
-	return findings
+	return findings, scan.GeoEnabled
 }
 
 // runStage4 queries Sysmon for the last 60 minutes of process creation and
@@ -398,11 +429,30 @@ func runStage3(ctx context.Context, cfg *config.Config) []Finding {
 // config-level availability flag is always true (sysmon_log carries a default).
 // A missing channel yields an INFO/TOOL_UNAVAILABLE finding — never a silent
 // clean stage.
+// sysmonTruncationFinding reports that a Sysmon stage analysed only PART of its
+// window. Silently analysing a capped timeline and presenting the result as if it
+// covered the full window is the silent-clean failure mode in a different costume —
+// the absent events are exactly where the evidence could have been.
+func sysmonTruncationFinding(kind string, analysed int) Finding {
+	return Finding{
+		Stage:    4,
+		Severity: SeverityInfo,
+		Category: "SYSMON_TRUNCATED",
+		Description: fmt.Sprintf(
+			"Sysmon %s events exceeded the %d-event read cap; only the %d most recent were analysed. "+
+				"Stage 4 findings therefore cover a PARTIAL window — query query_sysmon_events directly with a "+
+				"narrower since_minutes for full coverage.",
+			kind, DefaultSysmonMaxEvents, analysed),
+		Entity:     "sysmon",
+		Confidence: "HIGH",
+	}
+}
+
 func runStage4(ctx context.Context, cfg *config.Config) ([]Finding, bool) {
 	var findings []Finding
 
 	// ── ID 1: ProcessCreate — suspicious parent-child spawns ────────────
-	rawCreate, err := GetProcessCreateEvents(ctx, cfg, 60)
+	createEvents, createTruncated, err := querySysmonTyped(ctx, cfg, 1, 60, DefaultSysmonMaxEvents)
 	if errors.Is(err, ErrSysmonChannelMissing) {
 		findings = append(findings, Finding{
 			Stage:       4,
@@ -417,36 +467,36 @@ func runStage4(ctx context.Context, cfg *config.Config) ([]Finding, bool) {
 	if err != nil {
 		findings = append(findings, scanError(4, "sysmon-processcreate", err))
 	} else {
-		var createEvents []SysmonEvent
-		if json.Unmarshal([]byte(rawCreate), &createEvents) == nil {
-			for _, e := range createEvents {
-				if isSuspiciousParentInSysmon(e.ParentImage, e.ProcessName) {
-					findings = append(findings, Finding{
-						Stage:       4,
-						Severity:    SeverityHigh,
-						Category:    "SUSPICIOUS_SPAWN",
-						Description: fmt.Sprintf("Sysmon: %q spawned by %q at %s", e.ProcessName, e.ParentImage, e.Timestamp),
-						Entity:      fmt.Sprintf("PID %d", e.ProcessID),
-						Flags:       []string{"SUSPICIOUS_PARENT", "SYSMON_EVIDENCE"},
-						Confidence:  "HIGH",
-					})
-				}
-			}
-			if len(createEvents) > 0 {
+		if createTruncated {
+			findings = append(findings, sysmonTruncationFinding("process creation", len(createEvents)))
+		}
+		for _, e := range createEvents {
+			if isSuspiciousParentInSysmon(e.ParentImage, e.ProcessName) {
 				findings = append(findings, Finding{
 					Stage:       4,
-					Severity:    SeverityInfo,
-					Category:    "SYSMON_SUMMARY",
-					Description: fmt.Sprintf("Sysmon recorded %d process creation events in the last 60 minutes.", len(createEvents)),
-					Entity:      "sysmon",
+					Severity:    SeverityHigh,
+					Category:    "SUSPICIOUS_SPAWN",
+					Description: fmt.Sprintf("Sysmon: %q spawned by %q at %s", e.ProcessName, e.ParentImage, e.Timestamp),
+					Entity:      fmt.Sprintf("PID %d", e.ProcessID),
+					Flags:       []string{"SUSPICIOUS_PARENT", "SYSMON_EVIDENCE"},
 					Confidence:  "HIGH",
 				})
 			}
 		}
+		if len(createEvents) > 0 {
+			findings = append(findings, Finding{
+				Stage:       4,
+				Severity:    SeverityInfo,
+				Category:    "SYSMON_SUMMARY",
+				Description: fmt.Sprintf("Sysmon recorded %d process creation events in the last 60 minutes.", len(createEvents)),
+				Entity:      "sysmon",
+				Confidence:  "HIGH",
+			})
+		}
 	}
 
 	// ── ID 3: NetworkConnect — detect unusual outbound connections ───────
-	rawNet, err := GetNetworkEvents(ctx, cfg, 60)
+	netEvents, netTruncated, err := querySysmonTyped(ctx, cfg, 3, 60, DefaultSysmonMaxEvents)
 	if errors.Is(err, ErrSysmonChannelMissing) {
 		// Channel vanished between the two queries (or the first timed out
 		// while this one's probe found it gone) — mirror the first branch so
@@ -464,51 +514,51 @@ func runStage4(ctx context.Context, cfg *config.Config) ([]Finding, bool) {
 	if err != nil {
 		findings = append(findings, scanError(4, "sysmon-network", err))
 	} else {
-		var netEvents []SysmonEvent
-		if json.Unmarshal([]byte(rawNet), &netEvents) == nil {
-			// Beacon indicator: scripting hosts / admin tools making outbound internet connections
-			beaconSources := []string{
-				"powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe",
-				"mshta.exe", "rundll32.exe", "regsvr32.exe", "certutil.exe",
-				"bitsadmin.exe", "msiexec.exe",
-			}
-			for _, e := range netEvents {
-				srcLower := lowerBase(e.ProcessName)
-				for _, b := range beaconSources {
-					if srcLower == b && e.DestIP != "" {
-						desc := fmt.Sprintf("Sysmon: %q made outbound connection to %s", e.ProcessName, e.DestIP)
-						if e.DestPort > 0 {
-							desc += fmt.Sprintf(":%d", e.DestPort)
-						}
-						if e.DestHostname != "" {
-							desc += fmt.Sprintf(" (%s)", e.DestHostname)
-						}
-						if e.Timestamp != "" {
-							desc += fmt.Sprintf(" at %s", e.Timestamp)
-						}
-						findings = append(findings, Finding{
-							Stage:       4,
-							Severity:    SeverityHigh,
-							Category:    "BEACON_CANDIDATE",
-							Description: desc,
-							Entity:      fmt.Sprintf("PID %d -> %s", e.ProcessID, e.DestIP),
-							Flags:       []string{"SCRIPTING_HOST_NETWORK", "SYSMON_EVIDENCE"},
-							Confidence:  "HIGH",
-						})
-						break
+		if netTruncated {
+			findings = append(findings, sysmonTruncationFinding("network connection", len(netEvents)))
+		}
+		// Beacon indicator: scripting hosts / admin tools making outbound internet connections
+		beaconSources := []string{
+			"powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe",
+			"mshta.exe", "rundll32.exe", "regsvr32.exe", "certutil.exe",
+			"bitsadmin.exe", "msiexec.exe",
+		}
+		for _, e := range netEvents {
+			srcLower := lowerBase(e.ProcessName)
+			for _, b := range beaconSources {
+				if srcLower == b && e.DestIP != "" {
+					desc := fmt.Sprintf("Sysmon: %q made outbound connection to %s", e.ProcessName, e.DestIP)
+					if e.DestPort > 0 {
+						desc += fmt.Sprintf(":%d", e.DestPort)
 					}
+					if e.DestHostname != "" {
+						desc += fmt.Sprintf(" (%s)", e.DestHostname)
+					}
+					if e.Timestamp != "" {
+						desc += fmt.Sprintf(" at %s", e.Timestamp)
+					}
+					findings = append(findings, Finding{
+						Stage:       4,
+						Severity:    SeverityHigh,
+						Category:    "BEACON_CANDIDATE",
+						Description: desc,
+						Entity:      fmt.Sprintf("PID %d -> %s", e.ProcessID, e.DestIP),
+						Flags:       []string{"SCRIPTING_HOST_NETWORK", "SYSMON_EVIDENCE"},
+						Confidence:  "HIGH",
+					})
+					break
 				}
 			}
-			if len(netEvents) > 0 {
-				findings = append(findings, Finding{
-					Stage:       4,
-					Severity:    SeverityInfo,
-					Category:    "SYSMON_NETWORK_SUMMARY",
-					Description: fmt.Sprintf("Sysmon recorded %d network connection events in the last 60 minutes.", len(netEvents)),
-					Entity:      "sysmon",
-					Confidence:  "HIGH",
-				})
-			}
+		}
+		if len(netEvents) > 0 {
+			findings = append(findings, Finding{
+				Stage:       4,
+				Severity:    SeverityInfo,
+				Category:    "SYSMON_NETWORK_SUMMARY",
+				Description: fmt.Sprintf("Sysmon recorded %d network connection events in the last 60 minutes.", len(netEvents)),
+				Entity:      "sysmon",
+				Confidence:  "HIGH",
+			})
 		}
 	}
 
@@ -572,10 +622,24 @@ func runStage5(ctx context.Context, cfg *config.Config, avail config.ToolAvailab
 		return findings
 	}
 	if !avail.Autoruns {
-		return findings // nothing to score without autoruns hashes
+		// Autoruns entries are currently the ONLY source of file hashes, so a
+		// VT-configured host without autoruns scores nothing. Returning bare made this
+		// indistinguishable from "scanned everything and found nothing" — the same
+		// silent-clean class the Sysmon channel probe exists to eliminate. Every other
+		// unavailable path in this file emits a visible marker; so does this one now.
+		findings = append(findings, Finding{
+			Stage:       5,
+			Severity:    SeverityInfo,
+			Category:    "TOOL_UNAVAILABLE",
+			Description: "VirusTotal is configured but Autoruns is not — autoruns entries are the only source of file hashes today, so NO hash reputation scoring was performed. Configure autoruns_path to enable Stage 5.",
+			Entity:      "virustotal",
+			Confidence:  "HIGH",
+		})
+		return findings
 	}
 
 	checked := 0
+	lookupFailures := 0
 	for _, e := range entries {
 		if e.SHA256 == "" || len(e.SHA256) != 64 {
 			continue
@@ -589,10 +653,14 @@ func runStage5(ctx context.Context, cfg *config.Config, avail config.ToolAvailab
 		}
 		vtRaw, err := LookupHash(ctx, cfg, e.SHA256)
 		if err != nil {
+			// A failed lookup means this binary's reputation is UNKNOWN, not clean.
+			// Counted and reported below rather than dropped.
+			lookupFailures++
 			continue
 		}
 		var report VTReport
 		if err := json.Unmarshal([]byte(vtRaw), &report); err != nil {
+			lookupFailures++
 			continue
 		}
 		if report.Malicious == 0 {
@@ -610,6 +678,22 @@ func runStage5(ctx context.Context, cfg *config.Config, avail config.ToolAvailab
 			Entity:      fmt.Sprintf("%s @ %s", e.EntryName, e.EntryLocation),
 			Flags:       []string{"VT_HIT", "PERSISTENCE_MECHANISM"},
 			Confidence:  "HIGH",
+		})
+	}
+
+	// A lookup that never returned leaves that binary's reputation UNKNOWN, not clean.
+	// Dropping those silently would let a rate-limited or offline Stage 5 read as
+	// "nothing malicious found".
+	if lookupFailures > 0 {
+		findings = append(findings, Finding{
+			Stage:    5,
+			Severity: SeverityInfo,
+			Category: "SCAN_ERROR",
+			Description: fmt.Sprintf(
+				"%d of %d VirusTotal lookup(s) failed (rate limit, network, or API error) — those binaries were NOT scored and their reputation is unknown.",
+				lookupFailures, checked),
+			Entity:     "virustotal",
+			Confidence: "HIGH",
 		})
 	}
 	return findings

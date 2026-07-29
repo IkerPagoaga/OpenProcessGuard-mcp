@@ -13,7 +13,7 @@ import (
 // (local arithmetic is off by the DST offset across a transition; even a
 // ToUniversalTime() round-trip is ambiguous during the fall-back hour).
 func TestSysmonQueryScript(t *testing.T) {
-	s := sysmonQueryScript("Microsoft-Windows-Sysmon/Operational", 1, 30)
+	s := sysmonQueryScript("Microsoft-Windows-Sysmon/Operational", 1, 30, 2001)
 
 	if !strings.Contains(s, "[datetime]::UtcNow.AddMinutes(-30)") {
 		t.Errorf("script does not read the UTC clock directly (culture-safe + DST-exact); got:\n%s", s)
@@ -32,8 +32,52 @@ func TestSysmonQueryScript(t *testing.T) {
 	}
 	// The event ID and sinceMinutes are ints, so the format string can't be
 	// injected — a different N produces a different, still-safe window.
-	if !strings.Contains(sysmonQueryScript("X", 3, 1440), "[datetime]::UtcNow.AddMinutes(-1440)") {
+	if !strings.Contains(sysmonQueryScript("X", 3, 1440, 100), "[datetime]::UtcNow.AddMinutes(-1440)") {
 		t.Errorf("sinceMinutes not interpolated correctly")
+	}
+}
+
+// TestSysmonQueryScriptCapsResults locks the read cap. Without -MaxEvents, a wide
+// window on a Sysmon-instrumented host returns tens of thousands of events, each
+// ToXml()'d to several KB and buffered whole — blowing the timeout, the server's
+// memory, and the model's context in a single call.
+func TestSysmonQueryScriptCapsResults(t *testing.T) {
+	s := sysmonQueryScript("Microsoft-Windows-Sysmon/Operational", 1, 30, 2001)
+
+	if !strings.Contains(s, "-MaxEvents 2001") {
+		t.Errorf("script does not cap results with -MaxEvents; got:\n%s", s)
+	}
+	// The cap must apply to the event query itself, not the channel probe.
+	if strings.Index(s, "-FilterHashtable") > strings.Index(s, "-MaxEvents") {
+		t.Errorf("-MaxEvents must accompany the -FilterHashtable event query")
+	}
+	if !strings.Contains(sysmonQueryScript("X", 3, 60, 7), "-MaxEvents 7") {
+		t.Errorf("fetchLimit not interpolated correctly")
+	}
+}
+
+// TestClampSysmonMaxEvents pins the bounds: a client cannot disable the cap by asking
+// for zero/negative (which means "default") nor exceed the hard ceiling by asking for
+// more, so no tool argument can reintroduce the unbounded read.
+func TestClampSysmonMaxEvents(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"zero means default", 0, DefaultSysmonMaxEvents},
+		{"negative means default", -5, DefaultSysmonMaxEvents},
+		{"in range is preserved", 500, 500},
+		{"at ceiling is preserved", MaxSysmonMaxEvents, MaxSysmonMaxEvents},
+		{"above ceiling is clamped", MaxSysmonMaxEvents + 1, MaxSysmonMaxEvents},
+		{"absurd is clamped", 1 << 30, MaxSysmonMaxEvents},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampSysmonMaxEvents(tc.in); got != tc.want {
+				t.Errorf("clampSysmonMaxEvents(%d) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -43,7 +87,7 @@ func TestSysmonQueryScript(t *testing.T) {
 // machine without Sysmon reads as a CLEAN Stage 4, violating the "absence of
 // findings is not proof" principle.
 func TestSysmonQueryScriptProbesChannel(t *testing.T) {
-	s := sysmonQueryScript("Microsoft-Windows-Sysmon/Operational", 1, 30)
+	s := sysmonQueryScript("Microsoft-Windows-Sysmon/Operational", 1, 30, 2001)
 
 	if !strings.Contains(s, "Get-WinEvent -ListLog 'Microsoft-Windows-Sysmon/Operational' -ErrorAction Stop") {
 		t.Errorf("script does not probe channel existence before querying; got:\n%s", s)

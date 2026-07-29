@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"processguard-mcp/internal/config"
 	"processguard-mcp/internal/run"
 )
 
@@ -39,7 +38,7 @@ type UnsignedProcess struct {
 // GUI and stalled for the full timeout on every call before falling back. We now
 // derive signing status directly from Windows via Get-AuthenticodeSignature,
 // which is headless, reliable, and needs no external Sysinternals binary.
-func GetProcessTree(ctx context.Context, cfg *config.Config) (string, error) {
+func GetProcessTree(ctx context.Context) (string, error) {
 	procs, err := collectProcessesWithSigning(ctx, run.DefaultTimeout)
 	if err != nil {
 		return "", err
@@ -55,7 +54,7 @@ func GetProcessTree(ctx context.Context, cfg *config.Config) (string, error) {
 
 // GetUnsignedProcesses returns processes whose Authenticode signature is absent
 // or untrusted — a primary malware indicator when found in system paths.
-func GetUnsignedProcesses(ctx context.Context, cfg *config.Config) (string, error) {
+func GetUnsignedProcesses(ctx context.Context) (string, error) {
 	procs, err := collectProcessesWithSigning(ctx, run.DefaultTimeout)
 	if err != nil {
 		return "", err
