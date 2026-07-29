@@ -36,10 +36,32 @@ make check            # gofmt + vet + test + govulncheck
 
 ## Pull requests
 
-1. Branch from `main`.
-2. Add or update tests for the behaviour you change.
-3. Run `make check` locally.
-4. Describe the security impact of the change, if any.
+External contributors: **fork** the repository, branch from `main`, and open a PR
+from your fork. Direct pushes to `main` are disabled for everyone.
+
+1. Add or update tests for the behaviour you change.
+2. Run `make check` locally (gofmt + vet + test + govulncheck).
+3. Describe the security impact of the change, if any.
+
+## How contributions land (branch protection)
+
+`main` is a protected branch. Every change — including the maintainer's — arrives
+through a pull request; nothing is pushed directly.
+
+- **PRs only.** No direct pushes to `main`; force-pushes and branch deletion are blocked.
+- **CI must pass.** The `build-test` check (gofmt, `go vet`, race tests, `govulncheck`,
+  `staticcheck`) is a required status check — a red build cannot merge.
+- **Maintainer review is required.** [@IkerPagoaga](https://github.com/IkerPagoaga) is the
+  sole code owner ([`.github/CODEOWNERS`](.github/CODEOWNERS)); every PR needs their
+  approval before it can merge, and only the maintainer merges.
+- **Supply-chain guardrails.** Third-party GitHub Actions are pinned to full commit SHAs
+  (not moving tags), SHA-pinning is enforced repo-wide, and Dependabot proposes updates.
+  Secret-scanning push protection blocks commits that contain credentials. Releases are
+  built by the tagged pipeline and signed with cosign (keyless / Sigstore) — see the
+  README's "Verifying a release" section.
+
+Because a fork PR runs CI with a read-only token and no access to repository secrets,
+an untrusted contribution cannot exfiltrate anything or publish a release.
 
 ## Reporting security issues
 

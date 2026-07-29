@@ -16,20 +16,20 @@ jobs:
     if: github.repository == 'IkerPagoaga/OpenProcessGuard-mcp'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0 # full history for the changelog
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.25.x"
           check-latest: true
 
       # cosign for keyless signing; syft for SBOM generation.
-      - uses: sigstore/cosign-installer@v3
-      - uses: anchore/sbom-action/download-syft@v0
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: "~> v2"
           args: release --clean
