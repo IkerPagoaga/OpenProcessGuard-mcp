@@ -6,6 +6,99 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-07-28
+
+Remediation of a sixth external review. Every claim was ground-truthed against the
+v2.4.0 code before any edit — three of the review's claims were **refuted** and are
+deliberately not "fixed", and nine additional defects that the review missed were found
+during that verification and fixed here.
+
+### Fixed
+
+- **`install.ps1` no longer writes a UTF-8 BOM into `claude_desktop_config.json`.**
+  Under Windows PowerShell 5.1 (which the script requires) `Set-Content -Encoding UTF8`
+  emits a BOM; Electron reads the file as UTF-8 and hands it to `JSON.parse`, which
+  rejects a leading U+FEFF. The BOM therefore broke the **entire** `mcpServers` block —
+  every MCP server silently failed to load, not just this one. Now written with
+  `File.WriteAllText` + `UTF8Encoding($false)`, verified end-to-end against Node/V8.
+  Re-running the installer also repairs an already-BOM'd config.
+- **A single oversized JSON-RPC frame no longer kills the server process.**
+  `bufio.Scanner` returns `ErrTooLong` and is then permanently dead, so one >4 MB frame
+  made `serve` return and the process exit(1), silently dropping every subsequent
+  request from a still-live client. Framing is now done with `bufio.Reader`, which
+  drains and discards the oversized frame, answers `-32700`, and **resynchronises** on
+  the next frame.
+- **Child processes no longer flash console windows.** Every shell-out (`netstat`,
+  `reg`, `tasklist`, `powershell`, `autorunsc`) is spawned with `CREATE_NO_WINDOW`; the
+  MCP host is a GUI process, so Windows previously allocated a new console per child —
+  up to five per hunt and nine for `get_startup_entries`.
+- **Sysmon reads are capped and declare truncation.** `Get-WinEvent` ran with no
+  `-MaxEvents` over a window of up to 24 hours, `ToXml()`-ing every event and buffering
+  the lot. Reads are now bounded (`max_events`, default 2000, hard cap 10000), the
+  response reports `truncated`, and a truncated Stage 4 emits a `SYSMON_TRUNCATED`
+  finding so a partial timeline is never presented as full coverage.
+- **Four silent-degradation lanes closed**, restoring the project's "absence of findings
+  is not proof" invariant:
+  - a corrupt or unreadable `geoip_db` was swallowed while `Availability()` still
+    reported `geoip: true` — the hunt now probes it live, reports `geo_ip:false`, and
+    emits a `TOOL_UNAVAILABLE` finding;
+  - `reg query` failures were indistinguishable from absent keys, so an unreadable Run
+    key vanished from the results — unreadable locations are now reported and the
+    listing is marked `partial`;
+  - a PowerShell failure dropped **both** startup folders with no signal;
+  - Stage 5 returned empty with **no** marker when VirusTotal was configured but
+    Autoruns was not, and failed VirusTotal lookups were silently skipped — both now
+    reported.
+- **Child stdout is bounded** (`io`-limited, 16 MB). `cmd.Output()` buffered a runaway
+  child's entire output in memory. Truncation is a hard error rather than a silent
+  partial parse: a clipped CSV or JSON document parses into a plausible but incomplete
+  forensic answer, which is worse than a visible failure.
+- **`protocolVersion` is negotiated, not echoed.** The server previously returned any
+  string the client sent — verified live returning `2099-01-01` — asserting support it
+  could not honour. It now answers with a revision it actually implements, defaulting to
+  the newest supported (`2025-11-25`, up from the stale `2024-11-05`).
+- **JSON-RPC ids round-trip byte-for-byte.** Ids were decoded through `interface{}`,
+  routing every number via `float64` and silently rewriting values beyond 2^53.
+
+### Changed
+
+- **All 17 tools now carry MCP annotations** (`readOnlyHint: true`, plus
+  `openWorldHint: true` on `lookup_hash`). The read-only guarantee was asserted in prose
+  across five documents but was absent from the one machine-readable field a client can
+  actually enforce. The annotation is applied centrally, so a newly added tool cannot
+  omit it.
+- **The untrusted-data warning moved into the response envelope.** It previously
+  appeared in 4 of 17 tool descriptions — absent from `run_full_hunt`, `lookup_hash` and
+  every Sysmon tool, which carries the largest attacker-controlled field of all — and a
+  client is free not to surface descriptions at all.
+- **`run_full_hunt` no longer duplicates every finding.** The severity buckets held full
+  copies of the structs in `findings`, making exactly half the flagship tool's payload a
+  byte-identical duplicate (measured: 43,854 duplicated bytes in an 88,469-byte report).
+  They are now index arrays; bucket overhead dropped from 100% of the findings payload
+  to 0.9%.
+- **`list_processes` accepts `name_filter`, `min_memory_mb`, `sort_by` and `limit`**, and
+  reports `total_matched` / `truncated`. An unfiltered call previously returned every
+  process with every field — a measured 102,077 bytes — so answering "is X running?"
+  meant pulling the whole table into context. The default response is now ~22 KB.
+- **A global response budget** (256 KB) refuses oversized results with a per-tool hint
+  naming the argument to narrow. Per-field caps bounded individual strings, which is the
+  wrong axis: ten thousand short fields passed every check and still flooded the context.
+- `get_loaded_modules`' description no longer claims to detect injection and
+  sideloading. It reads the Windows loader's module list, so reflectively or manually
+  mapped DLLs — the actual injection techniques — do not appear there.
+- `GetProcessTree` / `GetUnsignedProcesses` dropped a `*config.Config` parameter they
+  never used.
+
+### Added
+
+- 34 tests covering the above (several table-driven, so more assertions than that), of
+  which 31 are platform-neutral and therefore actually execute in the Linux-only CI —
+  the 3 Windows-gated ones do not, which is itself a gap worth closing:
+  JSON-RPC framing and resync, protocol negotiation, id round-tripping,
+  tool annotations, a registry↔dispatcher drift test (all 17 tools, with a negative
+  control), hunt index integrity and duplication, output bounding, and Sysmon cap
+  clamping.
+
 ## [2.4.0] - 2026-07-13
 
 Polish release driven by a fifth external review (every finding of which was

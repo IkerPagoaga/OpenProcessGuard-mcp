@@ -121,7 +121,13 @@ else {
     try { $null = $json | ConvertFrom-Json } catch {
         throw "Refusing to write claude_desktop_config.json -- re-serialized JSON did not validate: $_"
     }
-    $json | Set-Content -Path $claudeCfg -Encoding UTF8
+    # WriteAllText with UTF8Encoding($false) -- NOT `Set-Content -Encoding UTF8`. Under Windows
+    # PowerShell 5.1 (which this script #Requires) `-Encoding UTF8` writes a UTF-8 BOM. Electron
+    # reads this file as utf8 and hands the string to JSON.parse, which rejects a leading U+FEFF
+    # ("Unexpected token"). A BOM here therefore breaks the ENTIRE mcpServers block -- every MCP
+    # server silently fails to load, not just this one. $claudeCfg is absolute, so WriteAllText's
+    # CWD-relative path resolution is not a hazard here.
+    [System.IO.File]::WriteAllText($claudeCfg, $json, (New-Object System.Text.UTF8Encoding $false))
     Write-Host "Registered 'processguard' in $claudeCfg (backup at $claudeCfg.bak)" -ForegroundColor Green
 }
 

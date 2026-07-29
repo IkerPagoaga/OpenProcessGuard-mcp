@@ -103,7 +103,13 @@ var ErrSysmonQueryFailed = errors.New("sysmon channel exists but could not be re
 // sinceMinutes/eventID are ints and logName is validated against a strict
 // allowlist at startup (no quotes in the charset), so none can inject into the
 // script.
-func sysmonQueryScript(logName string, eventID, sinceMinutes int) string {
+// fetchLimit bounds the rows Get-WinEvent returns. It is ALWAYS passed as the caller's
+// cap plus one: retrieving one extra row is what turns "exactly cap rows came back"
+// from ambiguous into a definite truncation signal (see querySysmonTyped). Without a
+// cap, a 24-hour EID 3 query on a busy host returns tens of thousands of events, each
+// ToXml()'d to ~2-4 KB and buffered whole — enough to blow the timeout, the server's
+// memory, and the model's context in one call.
+func sysmonQueryScript(logName string, eventID, sinceMinutes, fetchLimit int) string {
 	return fmt.Sprintf(`
 try { $null = Get-WinEvent -ListLog '%[1]s' -ErrorAction Stop } catch { '%[4]s'; exit }
 $filter = @{
@@ -112,7 +118,7 @@ $filter = @{
     StartTime = [datetime]::UtcNow.AddMinutes(-%[3]d)
 }
 try {
-    $events = Get-WinEvent -FilterHashtable $filter -ErrorAction Stop
+    $events = Get-WinEvent -FilterHashtable $filter -MaxEvents %[6]d -ErrorAction Stop
     if ($null -eq $events) { '[]'; exit }
     # Single event comes back as an object, not an array — wrap it
     $arr = @($events)
@@ -122,7 +128,7 @@ try {
     # FullyQualifiedErrorId is locale-invariant; exception message text is not.
     if ($_.FullyQualifiedErrorId -like 'NoMatchingEvents*') { '[]'; exit }
     '%[5]s'
-}`, logName, eventID, sinceMinutes, sysmonChannelMissingMarker, sysmonQueryFailedMarker)
+}`, logName, eventID, sinceMinutes, sysmonChannelMissingMarker, sysmonQueryFailedMarker, fetchLimit)
 }
 
 // decodeSysmonQueryOutput classifies the query script's stdout. Markers become
@@ -153,38 +159,110 @@ func decodeSysmonQueryOutput(raw string) ([]string, error) {
 	return xmlStrings, nil
 }
 
-// QuerySysmonEvents queries the Sysmon Windows Event Log for a specific
-// event ID within the last N minutes.
-func QuerySysmonEvents(ctx context.Context, cfg *config.Config, eventID, sinceMinutes int) (string, error) {
-	if cfg.SysmonLog == "" {
-		return "", fmt.Errorf("sysmon_log channel not configured")
-	}
+// Sysmon result bounds. A Sysmon-instrumented host generates enormous event volume
+// (EID 3 alone can exceed 10k/hour under a broad config), so every read is capped.
+const (
+	DefaultSysmonMaxEvents = 2000
+	MaxSysmonMaxEvents     = 10000
+)
 
-	out, err := run.PowerShellCtx(ctx, run.DefaultTimeout, sysmonQueryScript(cfg.SysmonLog, eventID, sinceMinutes))
+// clampSysmonMaxEvents normalises a caller-supplied cap: non-positive means "use the
+// default", and the hard ceiling is never exceeded regardless of what a client asks for.
+func clampSysmonMaxEvents(n int) int {
+	switch {
+	case n <= 0:
+		return DefaultSysmonMaxEvents
+	case n > MaxSysmonMaxEvents:
+		return MaxSysmonMaxEvents
+	default:
+		return n
+	}
+}
+
+// sysmonResult is the tool-facing envelope. It exists so a CAPPED read cannot look
+// identical to a complete one: `truncated` plus the explicit counts say outright that
+// the window held more evidence than was returned. Reporting a partial timeline as if
+// it were the whole one is the same silent-clean class the channel probe eliminates.
+type sysmonResult struct {
+	EventID      int           `json:"event_id"`
+	SinceMinutes int           `json:"since_minutes"`
+	Returned     int           `json:"returned"`
+	MaxEvents    int           `json:"max_events"`
+	Truncated    bool          `json:"truncated"`
+	Note         string        `json:"note,omitempty"`
+	Events       []SysmonEvent `json:"events"`
+}
+
+// querySysmonTyped is the internal query path: it returns parsed events plus whether
+// the read was truncated. In-process callers (run_full_hunt) use this rather than
+// unmarshalling the tool-facing JSON string, so the envelope's shape is free to change
+// without silently breaking the hunt.
+func querySysmonTyped(ctx context.Context, cfg *config.Config, eventID, sinceMinutes, maxEvents int) ([]SysmonEvent, bool, error) {
+	if cfg.SysmonLog == "" {
+		return nil, false, fmt.Errorf("sysmon_log channel not configured")
+	}
+	maxEvents = clampSysmonMaxEvents(maxEvents)
+
+	// Ask for one MORE than the cap. If the extra row comes back, strictly more than
+	// `maxEvents` events matched, which is what makes truncation detectable instead of
+	// merely suspected.
+	out, err := run.PowerShellCtx(ctx, run.DefaultTimeout,
+		sysmonQueryScript(cfg.SysmonLog, eventID, sinceMinutes, maxEvents+1))
 	if err != nil {
-		return "", fmt.Errorf("Get-WinEvent failed: %w — is Sysmon installed and running?", err)
+		return nil, false, fmt.Errorf("Get-WinEvent failed: %w — is Sysmon installed and running?", err)
 	}
 
 	xmlStrings, err := decodeSysmonQueryOutput(string(out))
 	switch {
 	case errors.Is(err, ErrSysmonChannelMissing):
-		return "", fmt.Errorf("channel %q not found or not accessible: %w", cfg.SysmonLog, err)
+		return nil, false, fmt.Errorf("channel %q not found or not accessible: %w", cfg.SysmonLog, err)
 	case errors.Is(err, ErrSysmonQueryFailed):
-		return "", fmt.Errorf("channel %q: %w", cfg.SysmonLog, err)
+		return nil, false, fmt.Errorf("channel %q: %w", cfg.SysmonLog, err)
 	case err != nil:
+		return nil, false, err
+	}
+
+	// Get-WinEvent returns newest-first, so the retained slice is the most recent
+	// window — the useful end for a forensic timeline.
+	truncated := len(xmlStrings) > maxEvents
+	if truncated {
+		xmlStrings = xmlStrings[:maxEvents]
+	}
+
+	events := make([]SysmonEvent, 0, len(xmlStrings))
+	for _, xmlStr := range xmlStrings {
+		events = append(events, parseSysmonXML(xmlStr, eventID))
+	}
+	return events, truncated, nil
+}
+
+// QuerySysmonEvents queries the Sysmon Windows Event Log for a specific event ID
+// within the last N minutes, returning at most maxEvents (0 = default cap) and
+// declaring explicitly whether the result was truncated.
+func QuerySysmonEvents(ctx context.Context, cfg *config.Config, eventID, sinceMinutes, maxEvents int) (string, error) {
+	maxEvents = clampSysmonMaxEvents(maxEvents)
+
+	events, truncated, err := querySysmonTyped(ctx, cfg, eventID, sinceMinutes, maxEvents)
+	if err != nil {
 		return "", err
 	}
 
-	var events []SysmonEvent
-	for _, xmlStr := range xmlStrings {
-		e := parseSysmonXML(xmlStr, eventID)
-		events = append(events, e)
+	res := sysmonResult{
+		EventID:      eventID,
+		SinceMinutes: sinceMinutes,
+		Returned:     len(events),
+		MaxEvents:    maxEvents,
+		Truncated:    truncated,
+		Events:       events,
 	}
-	if events == nil {
-		events = []SysmonEvent{}
+	if truncated {
+		res.Note = fmt.Sprintf(
+			"TRUNCATED: more than %d matching events exist in this window; only the %d most recent are shown. "+
+				"Narrow since_minutes, or raise max_events (hard cap %d), to see the rest.",
+			maxEvents, len(events), MaxSysmonMaxEvents)
 	}
 
-	result, err := json.MarshalIndent(events, "", "  ")
+	result, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -193,14 +271,14 @@ func QuerySysmonEvents(ctx context.Context, cfg *config.Config, eventID, sinceMi
 
 // GetProcessCreateEvents returns Sysmon Event ID 1 (ProcessCreate) for the
 // last N minutes. This is the primary forensic timeline source.
-func GetProcessCreateEvents(ctx context.Context, cfg *config.Config, sinceMinutes int) (string, error) {
-	return QuerySysmonEvents(ctx, cfg, 1, sinceMinutes)
+func GetProcessCreateEvents(ctx context.Context, cfg *config.Config, sinceMinutes, maxEvents int) (string, error) {
+	return QuerySysmonEvents(ctx, cfg, 1, sinceMinutes, maxEvents)
 }
 
 // GetNetworkEvents returns Sysmon Event ID 3 (NetworkConnect) for the
 // last N minutes. Use for C2 beacon detection and outbound call history.
-func GetNetworkEvents(ctx context.Context, cfg *config.Config, sinceMinutes int) (string, error) {
-	return QuerySysmonEvents(ctx, cfg, 3, sinceMinutes)
+func GetNetworkEvents(ctx context.Context, cfg *config.Config, sinceMinutes, maxEvents int) (string, error) {
+	return QuerySysmonEvents(ctx, cfg, 3, sinceMinutes, maxEvents)
 }
 
 // parseSysmonXML extracts key fields from a Sysmon event XML string using a

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/shirou/gopsutil/v3/process"
@@ -130,10 +131,48 @@ type ProcessInfo struct {
 	// implied a capability this tool does not have.
 }
 
-func ListProcesses() (string, error) {
+// ListProcessQuery narrows a process listing. Without it, list_processes returned
+// every process with every field — a measured 102,077 bytes in one call — so a model
+// wanting "is chrome running?" had to pull the whole table into its context and read it.
+// Zero values mean "no constraint", so an argument-less call behaves as before apart
+// from the default limit.
+type ListProcessQuery struct {
+	NameFilter  string  // case-insensitive substring match on name or exe path
+	MinMemoryMB float64 // drop processes below this resident size
+	SortBy      string  // "memory" (default), "cpu", "pid", "name"
+	Limit       int     // max rows returned; <=0 uses DefaultProcessLimit
+}
+
+// Process listing bounds.
+const (
+	DefaultProcessLimit = 100
+	MaxProcessLimit     = 2000
+)
+
+// listResult wraps the rows so a truncated listing announces itself. A bare array that
+// silently held 100 of 312 processes would read as "these are the processes".
+type listResult struct {
+	Total     int           `json:"total_matched"`
+	Returned  int           `json:"returned"`
+	Truncated bool          `json:"truncated"`
+	SortedBy  string        `json:"sorted_by"`
+	Note      string        `json:"note,omitempty"`
+	Processes []ProcessInfo `json:"processes"`
+}
+
+func ListProcesses(q ListProcessQuery) (string, error) {
 	procs, err := process.Processes()
 	if err != nil {
 		return "", fmt.Errorf("failed to list processes: %w", err)
+	}
+
+	needle := strings.ToLower(strings.TrimSpace(q.NameFilter))
+	limit := q.Limit
+	switch {
+	case limit <= 0:
+		limit = DefaultProcessLimit
+	case limit > MaxProcessLimit:
+		limit = MaxProcessLimit
 	}
 
 	var list []ProcessInfo
@@ -164,10 +203,55 @@ func ListProcesses() (string, error) {
 			info.Username = user
 		}
 
+		// Filters are applied AFTER field collection because the match runs against
+		// name and exe path, and the memory floor needs the resident size.
+		if needle != "" &&
+			!strings.Contains(strings.ToLower(info.Name), needle) &&
+			!strings.Contains(strings.ToLower(info.ExePath), needle) {
+			continue
+		}
+		if q.MinMemoryMB > 0 && float64(info.MemoryMB) < q.MinMemoryMB {
+			continue
+		}
+
 		list = append(list, info)
 	}
 
-	out, err := json.MarshalIndent(list, "", "  ")
+	sortBy := strings.ToLower(strings.TrimSpace(q.SortBy))
+	switch sortBy {
+	case "cpu":
+		sort.SliceStable(list, func(i, j int) bool { return list[i].CPUPercent > list[j].CPUPercent })
+	case "pid":
+		sort.SliceStable(list, func(i, j int) bool { return list[i].PID < list[j].PID })
+	case "name":
+		sort.SliceStable(list, func(i, j int) bool {
+			return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name)
+		})
+	default:
+		// Memory-descending by default: when a listing must be truncated, the biggest
+		// processes are the ones an analyst is most likely to want to see first.
+		sortBy = "memory"
+		sort.SliceStable(list, func(i, j int) bool { return list[i].MemoryMB > list[j].MemoryMB })
+	}
+
+	res := listResult{
+		Total:    len(list),
+		SortedBy: sortBy,
+	}
+	if len(list) > limit {
+		res.Truncated = true
+		res.Note = fmt.Sprintf(
+			"Showing the top %d of %d matching processes (sorted by %s). Narrow with name_filter or min_memory_mb, or raise limit (max %d).",
+			limit, len(list), sortBy, MaxProcessLimit)
+		list = list[:limit]
+	}
+	if list == nil {
+		list = []ProcessInfo{}
+	}
+	res.Processes = list
+	res.Returned = len(list)
+
+	out, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		return "", err
 	}
