@@ -19,7 +19,19 @@ const (
 	FlagMasquerade      = "SYSTEM_MASQUERADE" // core system-process name running from a user-writable/temp dir — near-certain masquerade
 )
 
-// systemProcessPaths: legitimate system processes and their expected path fragments
+// systemProcessPaths: legitimate system processes and their expected path fragments.
+//
+// Entries that list `\syswow64\` do so because a genuine Microsoft-signed 32-bit
+// variant ships there on 64-bit Windows; the rest are 64-bit only, and a copy of them
+// under SysWOW64 really would be suspicious. That split is not guesswork — it was
+// audited against a live Windows 11 install by checking, for every name below, whether
+// C:\Windows\SysWOW64\<name> exists AND carries a Valid Authenticode signature.
+//
+// dllhost.exe is the entry that fix v2.5.1 corrects: C:\Windows\SysWOW64\dllhost.exe is
+// the legitimate 32-bit COM surrogate (Valid, CN=Microsoft Windows) and runs routinely,
+// so restricting it to System32 emitted a HIGH WRONG_PATH finding on a perfectly clean
+// machine. A false HIGH is worse than a missed one: it teaches the operator to discount
+// the severity level that is supposed to demand attention.
 var systemProcessPaths = map[string][]string{
 	"svchost.exe":    {`\system32\`, `\syswow64\`},
 	"lsass.exe":      {`\system32\`},
@@ -31,12 +43,19 @@ var systemProcessPaths = map[string][]string{
 	"spoolsv.exe":    {`\system32\`},
 	"taskhost.exe":   {`\system32\`},
 	"taskhostw.exe":  {`\system32\`},
-	"explorer.exe":   {`\windows\`},
+	"explorer.exe":   {`\windows\`}, // C:\Windows\explorer.exe and the SysWOW64 copy both match
 	"conhost.exe":    {`\system32\`},
-	"dllhost.exe":    {`\system32\`},
+	"dllhost.exe":    {`\system32\`, `\syswow64\`},
 	"rundll32.exe":   {`\system32\`, `\syswow64\`},
-	"powershell.exe": {`\system32\`, `\syswow64\`},
+	"powershell.exe": {`\system32\`, `\syswow64\`}, // actual image is under <dir>\WindowsPowerShell\v1.0\
 	"cmd.exe":        {`\system32\`, `\syswow64\`},
+}
+
+// wow64SystemProcesses names the entries above that MUST tolerate a SysWOW64 image.
+// Keeping the expectation beside the data lets a test assert the two agree, so a future
+// edit cannot quietly drop a `\syswow64\` and resurrect the dllhost-class false positive.
+var wow64SystemProcesses = []string{
+	"svchost.exe", "dllhost.exe", "rundll32.exe", "powershell.exe", "cmd.exe",
 }
 
 // knownSpoof: common leet-speak or lookalike swaps attackers use
@@ -89,6 +108,27 @@ var coreSystemProcesses = map[string]bool{
 	"wininit.exe": true, "winlogon.exe": true, "services.exe": true,
 	"smss.exe": true, "spoolsv.exe": true, "taskhost.exe": true,
 	"taskhostw.exe": true, "conhost.exe": true, "dllhost.exe": true,
+}
+
+// wrongSystemPath reports whether a KNOWN system process is running from somewhere its
+// genuine image never lives. Pure and total, so the path map can be regression-tested
+// directly — the dllhost SysWOW64 false positive shipped precisely because this logic
+// was inline in a function that requires enumerating live processes to exercise.
+//
+// An unknown name or an unreadable image path is NOT suspicious here: a SYSTEM process
+// returns an empty path when ProcessGuard runs non-elevated, and treating that as a
+// wrong path would false-fire on every healthy machine.
+func wrongSystemPath(nameLower, exeLower string) bool {
+	expected, known := systemProcessPaths[nameLower]
+	if !known || exeLower == "" {
+		return false
+	}
+	for _, ep := range expected {
+		if strings.Contains(exeLower, ep) {
+			return false
+		}
+	}
+	return true
 }
 
 // masqueradeMatch reports a masquerade signal: a CORE system-process name whose
@@ -158,18 +198,9 @@ func GetSuspiciousProcesses() (string, error) {
 		}
 
 		// 2. Wrong path for known system process
-		if expectedPaths, ok := systemProcessPaths[nameLower]; ok && exe != "" {
-			matched := false
-			for _, ep := range expectedPaths {
-				if strings.Contains(exeLower, ep) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				flags = append(flags, FlagWrongPath)
-				reasons = append(reasons, fmt.Sprintf("system process %q running from unexpected path: %q", name, exe))
-			}
+		if wrongSystemPath(nameLower, exeLower) {
+			flags = append(flags, FlagWrongPath)
+			reasons = append(reasons, fmt.Sprintf("system process %q running from unexpected path: %q", name, exe))
 		}
 
 		// 3. Binary in suspicious directory

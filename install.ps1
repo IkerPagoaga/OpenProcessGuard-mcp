@@ -18,10 +18,20 @@
     Path to a prebuilt processguard-mcp.exe (e.g. from a verified GitHub Release).
 
 .PARAMETER ExpectedSha256
-    Expected SHA256 of -BinaryPath (from the release's SHA256SUMS). When supplied, the
-    binary is verified before install and a mismatch aborts. Strongly recommended with
-    -BinaryPath -- otherwise an unverified, potentially tampered elevated-privilege binary
-    is installed.
+    Expected SHA256 of the EXE at -BinaryPath. When supplied, the binary is verified
+    before install and a mismatch aborts. Strongly recommended with -BinaryPath --
+    otherwise an unverified, potentially tampered elevated-privilege binary is installed.
+
+    NOTE: the published SHA256SUMS lists the hashes of the ZIP archives, not of the exe
+    inside them, so you cannot copy a value straight out of it for this parameter. The
+    supported chain is: verify the ARCHIVE (cosign + SHA256SUMS, see the README's
+    "Verifying a release"), then take the exe's hash from the archive you just verified:
+
+        Get-FileHash .\processguard-mcp.exe -Algorithm SHA256
+
+    Verifying the archive is what establishes provenance; this parameter then guards the
+    copy itself. Omitting it after a verified extraction is reasonable -- the warning
+    below is aimed at installing a binary of unknown origin.
 
 .EXAMPLE
     .\install.ps1
@@ -33,6 +43,35 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Upgrading over a RUNNING server is the normal case, not an edge case: upgrading is
+# chiefly what this installer is for. Copy-Item's bare System.IO.IOException ("being
+# used by another process") names neither the holder nor the remedy, so detect the
+# condition up front and say exactly what to stop.
+function Assert-TargetNotInUse([string]$path) {
+    if (-not (Test-Path $path)) { return }
+
+    # Filter by process NAME first: enumerating .Path across every process raises
+    # access errors for protected processes this script has no business inspecting.
+    $holders = @(
+        Get-Process -Name 'processguard-mcp' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $path }
+    )
+    if ($holders.Count -eq 0) { return }
+
+    $detail = ($holders | ForEach-Object { "PID $($_.Id)" }) -join ', '
+    throw @"
+Cannot install: '$path' is in use by $($holders.Count) running process(es): $detail
+
+That is ProcessGuard itself, almost certainly running as an MCP server started by Claude.
+Stop it and re-run this installer:
+
+    Get-Process processguard-mcp | Stop-Process -Force
+
+Claude starts a fresh server the next time it connects, so nothing is lost. Fully
+quitting Claude Desktop has the same effect.
+"@
+}
 
 # The server runs elevated, so its binary must live where a non-admin cannot
 # replace it (otherwise: plant a malicious exe, wait for the next elevated run).
@@ -58,6 +97,7 @@ if ($BinaryPath) {
     else {
         Write-Warning "Installing $BinaryPath WITHOUT verification. Verify the release first (README 'Verifying a release'): pass -ExpectedSha256 <hash from SHA256SUMS>, or run 'cosign verify-blob' + 'sha256sum -c' before installing an elevated-privilege binary."
     }
+    Assert-TargetNotInUse $target
     Write-Host "Installing from $BinaryPath ..."
     Copy-Item -Path $BinaryPath -Destination $target -Force
 }
@@ -65,6 +105,8 @@ else {
     if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
         throw "Go is not installed. Install Go 1.25+ from https://go.dev/dl/, or re-run with -BinaryPath pointing at a downloaded release binary."
     }
+    # The build writes straight to $target, so it hits the same in-use failure.
+    Assert-TargetNotInUse $target
     Write-Host "Building processguard-mcp from source ..."
     $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
     Push-Location $scriptRoot
@@ -82,6 +124,10 @@ else {
     finally { Pop-Location }
 }
 Write-Host "Installed to $target" -ForegroundColor Green
+# Print the installed exe's hash: SHA256SUMS publishes ARCHIVE hashes only, so this is
+# the value to pass to -ExpectedSha256 on a later re-install, and the one to compare if
+# you ever need to confirm which build is deployed.
+Write-Host "  SHA256: $((Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash)"
 
 # Harden config.json if it already exists (upgrade / re-install): it may hold the
 # VirusTotal API key, and files under Program Files are world-READABLE by default.
