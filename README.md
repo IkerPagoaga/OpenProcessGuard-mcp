@@ -62,6 +62,21 @@ cosign verify-blob \
   processguard-mcp_<version>_SHA256SUMS
 ```
 
+`SHA256SUMS` lists the hashes of the **`.zip` archives**, not of the `.exe` inside them. That is
+the right thing to verify — it is what cosign signs — but it means you cannot copy a value out of
+it for `install.ps1 -ExpectedSha256`, which checks the exe. Verify the archive first (above), then
+take the exe's hash from the archive you just verified:
+
+```powershell
+Expand-Archive processguard-mcp_<version>_windows_amd64.zip -DestinationPath .\pg
+Get-FileHash .\pg\processguard-mcp.exe -Algorithm SHA256    # value for -ExpectedSha256
+.\pg\install.ps1 -BinaryPath .\pg\processguard-mcp.exe -ExpectedSha256 <that hash>
+```
+
+Verifying the archive is what establishes provenance; `-ExpectedSha256` then guards the copy
+itself. `install.ps1` also prints the installed binary's SHA256, so you can confirm later which
+build is actually deployed.
+
 A CycloneDX SBOM is attached to every release for supply-chain audits.
 
 **More docs:** [ARCHITECTURE.md](ARCHITECTURE.md) · [LIMITATIONS.md](LIMITATIONS.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) · [SECURITY.md](SECURITY.md)

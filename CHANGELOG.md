@@ -6,6 +6,46 @@ All notable changes to ProcessGuard MCP are documented here. The format is based
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-07-29
+
+Fixes a false-positive HIGH finding and three defects in the install path. All four were
+found by dogfooding the actual v2.5.0 release — downloading it, verifying it, installing
+it, and running a hunt — rather than by review; four external reviews had not caught any
+of them.
+
+### Fixed
+
+- **`dllhost.exe` running from `SysWOW64` no longer raises a HIGH `WRONG_PATH` finding.**
+  `C:\Windows\SysWOW64\dllhost.exe` is the legitimate 32-bit COM surrogate — Microsoft-
+  signed, `Valid`, and routinely running — but the path map allowed it only under
+  `System32`, so it produced the **only HIGH finding on a completely clean machine**. A
+  false HIGH is worse than a missed one: it trains the operator to discount the severity
+  that exists to demand attention. The whole map was audited against a live Windows
+  install (does `SysWOW64\<name>` exist AND carry a Valid signature?); `dllhost.exe` was
+  the only entry affected, and the System32-only entries — `lsass`, `csrss`, `wininit`,
+  `winlogon`, `services`, `smss` — are correct and still flag a SysWOW64 impostor. The
+  check was extracted into a pure `wrongSystemPath` function so the map is now
+  regression-tested directly, which is why the bug survived: the logic was only reachable
+  by enumerating live processes.
+- **`install.ps1` now ships inside the release archive.** The README's Quick start tells
+  the user to download a signed release and run `.\install.ps1`, but the goreleaser
+  archive contained only `README.md`, `LICENSE`, `SECURITY.md` and `config.example.json`
+  — so the project's own recommended install path was impossible to follow from a
+  release, from v2.1.0 through v2.5.0. A test now asserts the archive ships every file
+  the docs tell users to run.
+- **`install.ps1` detects an in-use binary instead of failing with a raw exception.**
+  Upgrading over a running server is the normal case — upgrading is what the installer is
+  for — but `Copy-Item` failed with a bare `System.IO.IOException` naming neither the
+  holding process nor the remedy. The installer now identifies the holders by PID and
+  prints the exact command to stop them. Both the prebuilt and build-from-source paths
+  are guarded.
+- **The value `-ExpectedSha256` wants is now obtainable.** The published `SHA256SUMS`
+  lists archive hashes, not the exe's, so a user following the docs literally could not
+  produce the value the flag compares against. README's verify section now shows the
+  supported chain (verify the archive with cosign, then hash the extracted exe), the
+  parameter help says the same, and the installer prints the installed binary's SHA256 so
+  the deployed build can be confirmed later.
+
 ## [2.5.0] - 2026-07-28
 
 Remediation of a sixth external review. Every claim was ground-truthed against the

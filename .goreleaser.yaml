@@ -31,11 +31,16 @@ archives:
   - id: default
     formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Anything the docs tell a user to RUN must ship here. install.ps1 was absent from
+    # v2.1.0 through v2.5.0, silently breaking the README's own Quick start ("download
+    # the signed release -> run the installer") for every release downloader.
+    # internal/tools/release_archive_test.go keeps this list in sync with the docs.
     files:
       - README.md
       - LICENSE
       - SECURITY.md
       - config.example.json
+      - install.ps1
 
 # SHA256SUMS for every artifact.
 checksum:
