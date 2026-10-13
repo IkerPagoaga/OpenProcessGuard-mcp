@@ -1,18 +1,11 @@
 module processguard-mcp
 
-go 1.25.0
-
-// Build with a patched toolchain: go1.25.12 carries the fixes go1.25.11
-// shipped for 8 standard-library advisories (crypto/x509, crypto/tls,
-// net/http, net/url, net/textproto) reachable via the VirusTotal HTTPS
-// client, plus the stdlib fixes that landed only in .12. Verified clean by
-// govulncheck.
-toolchain go1.25.12
+go 1.26.0
 
 require (
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/shirou/gopsutil/v3 v3.23.12
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
